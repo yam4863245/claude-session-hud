@@ -212,6 +212,7 @@ $poller.Runspace = $rs
     # {"type":"ai-title","sessionId":...,"aiTitle":...} 記錄，每輪都會追加一筆，取最後一筆。
     # 目錄名的正規化規則：cwd 裡所有非英數字元一律換成 "-"。
     $titleCache = @{}
+    $statusDir = Join-Path $env:USERPROFILE '.claude\session-status'
 
     function Resolve-TranscriptPath([string]$cwd, [string]$sessionId) {
         $safe = ($cwd -replace '[^A-Za-z0-9]', '-')
@@ -259,6 +260,17 @@ $poller.Runspace = $rs
             foreach ($s in $list) {
                 $title = ''
                 $tp = Resolve-TranscriptPath $s.cwd $s.sessionId
+
+                # VS Code 的 Claude Code 外掛會「預先」開好一個不帶 --resume 的 claude 行程等著用。
+                # 它有自己的 sessionId、也會被 claude agents --json 列出來，但沒有任何對話：
+                # 沒有轉錄檔，也不會觸發任何 hook。對使用者來說那就是一列看不懂的代號，
+                # 而且點了不會切分頁、狀態永遠是「未知」——過濾掉。
+                #
+                # 條件要兩個都不成立才排除，不能只看轉錄檔：轉錄檔的路徑是從 cwd 推導的，
+                # 推導失敗時真正的 session 也會找不到檔案，這時狀態檔就是第二道保險。
+                $hasStatus = Test-Path (Join-Path $statusDir "$($s.sessionId).json")
+                if (-not $tp -and -not $hasStatus) { continue }
+
                 if ($tp) {
                     $fi = New-Object System.IO.FileInfo $tp
                     $stamp = "$($fi.Length):$($fi.LastWriteTimeUtc.Ticks)"

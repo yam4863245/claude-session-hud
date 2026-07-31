@@ -70,6 +70,7 @@ claude plugin install session-hud
 | 元件 | 做什麼 |
 |---|---|
 | `scripts/session-hud.ps1` | HUD 本體。背景 runspace 每 3 秒跑 `claude agents --json`，UI 執行緒只負責繪製 |
+| ↳ 佔位行程過濾 | VS Code 外掛會預先開好備用的 `claude` 行程，它們會出現在 `claude agents --json` 裡但沒有任何對話 —— 沒有轉錄檔也沒有狀態檔的一律不列出 |
 | `scripts/status-hook.cjs` | 由 hooks 呼叫，把狀態寫到 `~/.claude/session-status/<sessionId>.json` |
 | `hooks/hooks.json` | 四個全域事件 → 狀態：`UserPromptSubmit`=執行中、`Notification`=等你、`Stop`=已完成、`SessionEnd`=刪除 |
 | `scripts/start-hud.vbs` | 無主控台啟動器 |

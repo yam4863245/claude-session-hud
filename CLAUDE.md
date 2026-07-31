@@ -47,6 +47,13 @@ claude plugin update session-hud
 串起兩邊的 key 是 `claude agents --json` 的 `sessionId`，也就是 hook payload 的 `session_id`。
 沒有狀態檔 = `unknown`，不是錯誤。
 
+**`claude agents --json` 不等於「使用者看得到的 session」。** VS Code 外掛會預先開好不帶
+`--resume` 的 `claude` 行程等著用，它們有 `sessionId`、會被列出來，但沒有任何對話 ——
+沒有轉錄檔、也不會觸發任何 hook，畫出來就是一列看不懂的代號。poller 用
+「沒有轉錄檔 **且** 沒有狀態檔」把它們濾掉。兩個條件都要，不能只看轉錄檔：
+轉錄檔路徑是從 cwd 推導的，推導失敗時真的 session 也會找不到檔案。
+這個過濾是自我修正的 —— 使用者一在那個分頁開始對話，它就會自己冒出來。
+
 **完成音效也在 HUD 這邊**（`Invoke-DoneSound`），不在 hook 裡 —— HUD 本來就有狀態機，
 抓得到「上一輪不是 done、這一輪是 done」那一刻。兩個必要條件：**第一輪只記錄不發聲**
 （否則 HUD 一開就把既有的 done 全部叫一遍），以及**比對的是降級前的原始狀態**
