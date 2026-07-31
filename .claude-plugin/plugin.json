@@ -1,7 +1,7 @@
 {
   "name": "session-hud",
-  "version": "1.0.0",
-  "description": "懸浮顯示所有正在執行的 Claude Code session（跨全部專案），含對話標題、所屬專案、執行時間與忙碌／等待／閒置狀態；點一下可切換到對應的編輯器視窗。Windows 專用。",
+  "version": "1.1.0",
+  "description": "懸浮顯示所有正在執行的 Claude Code session（跨全部專案），含對話標題、所屬專案、執行時間與執行中／等你／已完成／閒置狀態；點一下可切換到對應的編輯器視窗與分頁。Windows 專用。",
   "author": {
     "name": "yam4863245"
   },

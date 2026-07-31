@@ -6,7 +6,7 @@
 ┌────────────────────────────────────────┐
 │ Claude Sessions (4)                  ✕ │
 ├────────────────────────────────────────┤
-│ ● 重構認證中介層                 閒置 │
+│ ● 重構認證中介層               已完成 │
 │   my-api · my-api-a1 · 3h12            │
 │ ● 修掉 CI 的快取失效問題       執行中 │
 │   my-api · my-api-7c · 48m             │
@@ -18,7 +18,21 @@
 ```
 
 每一列顯示：**對話標題**、所屬專案、session 代號、已開啟時間，以及狀態圓點與文字。
-點任一列會把對應的編輯器視窗帶到前景。
+點任一列會把對應的編輯器視窗帶到前景，**並切換到該 session 的分頁**。
+
+平常視窗是半透明的，滑鼠移上去才會變清楚 —— 它永遠置頂，不該一直擋住底下的東西。
+
+## 狀態
+
+| 狀態 | 什麼時候 |
+|---|---|
+| **執行中** | 你送出提示後，Claude 正在跑 |
+| **等你** | 卡在授權或提問上 |
+| **已完成** | 回合跑完了，但你還沒回頭看 |
+| **閒置** | 跑完而且你已經看過了 |
+| **未知** | 這個 session 在 hooks 裝好之前就開著了 |
+
+「已完成」會在你把那個 session 切到前景時自動變成「閒置」，所以掃一眼 HUD 就知道哪些回合還沒收。
 
 ## 需求
 
@@ -53,7 +67,7 @@ claude plugin install session-hud
 |---|---|
 | `scripts/session-hud.ps1` | HUD 本體。背景 runspace 每 3 秒跑 `claude agents --json`，UI 執行緒只負責繪製 |
 | `scripts/status-hook.cjs` | 由 hooks 呼叫，把狀態寫到 `~/.claude/session-status/<sessionId>.json` |
-| `hooks/hooks.json` | 四個全域事件 → 狀態：`UserPromptSubmit`=執行中、`Notification`=等你、`Stop`=閒置、`SessionEnd`=刪除 |
+| `hooks/hooks.json` | 四個全域事件 → 狀態：`UserPromptSubmit`=執行中、`Notification`=等你、`Stop`=已完成、`SessionEnd`=刪除 |
 | `scripts/start-hud.vbs` | 無主控台啟動器 |
 
 **對話標題**取自轉錄檔 `~/.claude/projects/<正規化cwd>/<sessionId>.jsonl` 裡最後一筆
@@ -71,7 +85,8 @@ claude plugin install session-hud
 
 - **僅 Windows**。
 - **點擊聚焦靠視窗標題比對**：找標題含 `- <專案資料夾名> -` 或 `- <專案資料夾名> (` 的視窗。VS Code、Cursor 這類會把資料夾名寫進標題的編輯器可用；純終端機的 session 通常找不到對應視窗。
-- **同一個編輯器視窗裡的多個 session 無法區分** —— 點擊只能帶你到那個視窗，不能切到特定的終端機分頁。
+- **切分頁與「已完成→閒置」都靠對話標題**：分頁名稱與視窗標題裡的都是對話標題，所以還沒產生標題的新 session 只會被帶到視窗、不會切分頁，狀態也不會自動降級。同一視窗裡兩個 session 標題剛好一樣時也分不出來。
+- **切分頁會讓該 VS Code 視窗開啟完整無障礙樹**（跟裝了螢幕閱讀器一樣），那個視窗的記憶體與 CPU 會略微上升，直到 VS Code 重開。只有真的點了列才會發生。
 - **已開著的 session 一開始顯示「未知」**，要等它下次送出提示或結束回合才會有狀態。
 - 介面為繁體中文。
 
@@ -85,6 +100,8 @@ claude plugin install session-hud
 - `SizeToContent="Height"` 在 `AllowsTransparency` + `NoResize` 下首次排版後就不再跟著內容變高。
 - PowerShell 的 WPF 事件處理器會**靜默吞掉例外**，所以處理器內都自己包 try/catch 並寫 log。
 - `.vbs` 必須是 **ASCII 且無 BOM**（cscript 不吃 UTF-8 BOM）；`.ps1` 反之必須**有 BOM**，否則 PS 5.1 會把中文讀成亂碼。
+- **切編輯器分頁走 UI Automation**：Win32 只看得到視窗。VS Code 的分頁是 `TabItem`，名稱等於對話標題，畫面分成多個編輯器群組時會多一段 `, 編輯器群組 N` 後綴。切換用 `SelectionItemPattern.Select()`（`InvokePattern` 不存在）；讀 `IsSelected` 驗證會**慢一拍**拿到上一次的值，別因此以為沒切成功。
+- **透明度一律走 `BeginAnimation`**：混用直接指派 `Opacity` 會被動畫的保留值蓋掉，滑鼠移開後就變不回半透明。
 
 ## 授權
 

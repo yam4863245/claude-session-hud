@@ -29,6 +29,14 @@ $script:DpiMode = [Dpi]::Apply()
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
+# UI Automation 用來切換 VS Code 的編輯器分頁（同一個視窗裡的不同 session）。
+# 載不到就退化成「只把視窗帶到前景」，不讓 HUD 整個起不來。
+$script:UiaOk = $false
+try {
+    Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+    $script:UiaOk = $true
+} catch { }
+
 $script:Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # 執行期狀態一律寫到使用者家目錄，不寫回腳本所在資料夾。
@@ -92,6 +100,18 @@ public class HudWin {
     SetForegroundWindow(h);
   }
 
+  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+
+  // 前景視窗標題。VS Code 的標題是「<作用中分頁名> - <資料夾> - Visual Studio Code」，
+  // 所以光靠標題就能判斷使用者現在正在看哪一個 session，不必再開 UIA。
+  public static string ForegroundTitle() {
+    IntPtr h = GetForegroundWindow();
+    if (h == IntPtr.Zero) return "";
+    int len = GetWindowTextLength(h); if (len == 0) return "";
+    var sb = new StringBuilder(len + 1); GetWindowText(h, sb, sb.Capacity);
+    return sb.ToString();
+  }
+
   [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
@@ -99,20 +119,77 @@ public class HudWin {
 }
 "@
 
-# 依專案資料夾名找出最合適的編輯器視窗。
+# --- 編輯器分頁定位（UI Automation）------------------------------------------
+# 一個 VS Code 視窗裡可以同時開好幾個 Claude session，每個是一個編輯器分頁，
+# 分頁名稱就是該 session 的對話標題（跟 HUD 第一行顯示的是同一個字串）。
+# Win32 只看得到視窗，看不到分頁，所以這裡走 UIA：找到 TabItem 後用
+# SelectionItemPattern.Select() 切過去。
+#
+# 只在「使用者點了某一列」時才呼叫——掃一次 UIA 樹要 ~100ms，不能放進輪詢迴圈。
+# 副作用：對 Electron 視窗發 UIA 查詢會讓 Chromium 開啟完整無障礙樹（跟螢幕閱讀器一樣），
+# 那個視窗的記憶體與 CPU 會略微上升，直到 VS Code 重開為止。
+function Find-EditorTab($hwnd, [string]$convTitle) {
+    if (-not $UiaOk -or [string]::IsNullOrWhiteSpace($convTitle)) { return $null }
+    try {
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
+        if (-not $root) { return $null }
+        $cond = New-Object System.Windows.Automation.PropertyCondition(
+                    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                    [System.Windows.Automation.ControlType]::TabItem)
+        foreach ($t in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) {
+            $n = $t.Current.Name
+            if (-not $n) { continue }
+            # 畫面上分成多個編輯器群組時，分頁名稱會多一段「, 編輯器群組 N」後綴，
+            # 只有單一群組時則沒有——兩種都要接。
+            if ($n -eq $convTitle -or $n.StartsWith("$convTitle, ", 'Ordinal')) { return $t }
+        }
+    } catch { }
+    return $null
+}
+
+function Select-EditorTab($tabElement) {
+    if (-not $tabElement) { return $false }
+    try {
+        # 分頁多到被擠出可視範圍時要先捲進來，否則 Select 會切到但看不到
+        try { $tabElement.GetCurrentPattern(
+                [System.Windows.Automation.ScrollItemPattern]::Pattern).ScrollIntoView() } catch { }
+        $tabElement.GetCurrentPattern(
+            [System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
+        return $true
+    } catch { return $false }
+}
+
+# 依專案資料夾名 + 對話標題找出該 session 的視窗與分頁。
 # 用分數而不是單純 contains：資料夾名可能互為子字串（例如 "api" 與 "api-worker"），
 # 單純比對包含關係會挑到錯的視窗。
-function Find-WindowForProject([string]$baseName) {
-    $best = $null; $bestScore = 0
+# 回傳 @{ Win = <HudWin.Win>; Tab = <AutomationElement 或 $null> }。
+function Find-TargetForSession([string]$baseName, [string]$convTitle) {
+    $cands = New-Object System.Collections.Generic.List[object]
     foreach ($w in [HudWin]::Visible()) {
         $t = $w.Title
         $score = 0
         if ($t -like "* - $baseName - *")  { $score = 3 }   # 一般資料夾
         elseif ($t -like "* - $baseName (*") { $score = 2 } # 工作區
         elseif ($t -like "*$baseName*")      { $score = 1 } # 寬鬆
-        if ($score -gt $bestScore) { $bestScore = $score; $best = $w }
+        if ($score -eq 0) { continue }
+        # 標題開頭就是這個對話標題 = 這個視窗此刻正開著該 session，直接命中，
+        # 連 UIA 都不用掃。這也是同專案開在多個視窗時最可靠的判別依據。
+        if ($convTitle -and $t.StartsWith("$convTitle - ", 'Ordinal')) { $score += 10 }
+        $cands.Add([PSCustomObject]@{ Win = $w; Score = $score })
     }
-    return $best
+    if ($cands.Count -eq 0) { return $null }
+
+    $ranked = @($cands | Sort-Object -Property Score -Descending)
+    $best = $ranked[0]
+    if ($best.Score -ge 10) { return @{ Win = $best.Win; Tab = $null } }  # 已經是作用中分頁
+
+    # 同專案可能開在好幾個視窗，標題只告訴我們「作用中」的分頁是誰。
+    # 逐一問 UIA「你有沒有這個分頁」，第一個有的就是正解。
+    foreach ($c in $ranked) {
+        $tab = Find-EditorTab $c.Win.Handle $convTitle
+        if ($tab) { return @{ Win = $c.Win; Tab = $tab } }
+    }
+    return @{ Win = $best.Win; Tab = $null }
 }
 
 # --- 背景輪詢：claude agents --json 要 ~640ms，絕不能跑在 UI 執行緒上 ----------
@@ -277,6 +354,29 @@ if (Test-Path $PosFile) {
 $HeaderBar.Add_MouseLeftButtonDown({ $win.DragMove() })
 $CloseBtn.Add_MouseLeftButtonUp({ $win.Close() })
 
+# --- 透明度：平常淡淡的一片，滑鼠移上去才變清楚 --------------------------------
+# 這是個永遠置頂的視窗，長時間壓在別的內容上面，所以預設要夠透明才不礙事。
+$script:OPACITY_IDLE  = 0.45
+$script:OPACITY_HOVER = 1.0
+
+function Set-HudOpacity([double]$to) {
+    try {
+        $anim = New-Object System.Windows.Media.Animation.DoubleAnimation
+        $anim.To = $to
+        $anim.Duration = New-Object Windows.Duration ([TimeSpan]::FromMilliseconds(150))
+        # 一律走動畫：BeginAnimation 之後動畫值會壓過直接指派給 Opacity 的值，
+        # 兩種寫法混用的話滑出去就不會變回透明了。
+        $win.BeginAnimation([System.Windows.Window]::OpacityProperty, $anim)
+    } catch { Write-Diag ("OPACITY 例外: {0}" -f $_.Exception.Message) }
+}
+
+$win.Opacity = $OPACITY_IDLE
+# 綁在 RootBorder 而不是 $win：視窗本身的背景是 Transparent，命中測試不一定吃得到。
+# 滑到內層的列上「不會」觸發這裡的 MouseLeave——MouseEnter/Leave 看的是 IsMouseOver，
+# 滑鼠還在 RootBorder 範圍內就不算離開。
+$RootBorder.Add_MouseEnter({ Set-HudOpacity $OPACITY_HOVER })
+$RootBorder.Add_MouseLeave({ Set-HudOpacity $OPACITY_IDLE })
+
 # SizeToContent="Height" 讓實際高度要等排版完才知道；而且 session 一多高度還會再變，
 # 所以夾回工作區的動作要在「首次渲染」和「每次尺寸變動」都做一次，
 # 否則列變多時視窗底部會滑到工作列底下。
@@ -288,7 +388,7 @@ function Clamp-ToWorkArea {
     if ($win.Top  -lt $a.Top)  { $win.Top  = $a.Top  + 8 }
 }
 $script:HudHwnd    = [IntPtr]::Zero
-$script:RowProjects = @()     # 每一列對應的專案名，順序同畫面
+$script:RowMeta     = @()     # 每一列對應的 @{ Proj; Title }，順序同畫面
 $script:RowsTopPx   = 0       # 列區頂端（視窗內實體像素）
 $script:RowPitchPx  = 0       # 每列高度（實體像素）
 
@@ -302,7 +402,7 @@ $win.Add_ContentRendered({
 # 兩者差一個 scale，結果就是「點第 5 列會觸發第 6 列」，最後一列則完全點不到。
 $win.Add_MouseLeftButtonUp({
     try {
-        if ($RowPitchPx -le 0 -or $RowProjects.Count -eq 0) { return }
+        if ($RowPitchPx -le 0 -or $RowMeta.Count -eq 0) { return }
         if ($HudHwnd -eq [IntPtr]::Zero) { return }
         $pt = New-Object HudWin+POINT
         if (-not [HudWin]::GetCursorPos([ref]$pt)) { return }
@@ -311,15 +411,19 @@ $win.Add_MouseLeftButtonUp({
 
         $localY = $pt.Y - $rc.T
         $idx = [int][Math]::Floor(($localY - $RowsTopPx) / $RowPitchPx)
-        if ($idx -lt 0 -or $idx -ge $RowProjects.Count) { return }   # 點在標題列或狀態列，忽略
+        if ($idx -lt 0 -or $idx -ge $RowMeta.Count) { return }   # 點在標題列或狀態列，忽略
 
-        $proj = $RowProjects[$idx]
-        $target = Find-WindowForProject $proj
+        $meta = $RowMeta[$idx]
+        $target = Find-TargetForSession $meta.Proj $meta.Title
         if ($target) {
-            [HudWin]::Focus($target.Handle)
-            Write-Diag ("CLICK idx={0} proj={1} -> `"{2}`"" -f $idx, $proj, $target.Title)
+            # 順序很重要：先把視窗帶到前景，再切分頁。
+            # 反過來的話 Select 會在背景視窗上生效，使用者只看到視窗跳出來但停在別的分頁。
+            [HudWin]::Focus($target.Win.Handle)
+            $switched = Select-EditorTab $target.Tab
+            Write-Diag ("CLICK idx={0} proj={1} title={2} -> `"{3}`" 切分頁={4}" -f `
+                $idx, $meta.Proj, $meta.Title, $target.Win.Title, $switched)
         } else {
-            Write-Diag ("CLICK idx={0} proj={1} -> 找不到對應視窗" -f $idx, $proj)
+            Write-Diag ("CLICK idx={0} proj={1} -> 找不到對應視窗" -f $idx, $meta.Proj)
         }
     } catch {
         Write-Diag ("CLICK 例外: {0}" -f $_.Exception.Message)
@@ -407,6 +511,7 @@ $script:StatusDir = Join-Path $env:USERPROFILE '.claude\session-status'
 $STATUS_STYLE = @{
     working = @{ Color = '#FF9ECE6A'; Label = '執行中' }
     waiting = @{ Color = '#FFE0AF68'; Label = '等你'   }
+    done    = @{ Color = '#FF7AA2F7'; Label = '已完成' }
     idle    = @{ Color = '#FF6E7681'; Label = '閒置'   }
     unknown = @{ Color = '#FF3F3F48'; Label = '未知'   }
 }
@@ -421,6 +526,38 @@ function Get-SessionStatus([string]$sessionId) {
         if ($STATUS_STYLE.ContainsKey($s)) { return $s }
     } catch { }
     return 'unknown'
+}
+
+# 「已完成」是給還沒回頭看的回合用的：Stop hook 寫 done，使用者一把那個 session
+# 切到前景就降級成 idle（閒置）。降級寫回檔案而不是只記在記憶體裡，這樣 HUD 重開
+# 也不會讓所有早就看過的 session 又全部亮回「已完成」。
+function Set-SessionIdleIfDone([string]$sessionId) {
+    try {
+        $f = Join-Path $StatusDir ($sessionId + '.json')
+        if (-not (Test-Path $f)) { return }
+        $j = Get-Content $f -Raw -ErrorAction Stop | ConvertFrom-Json
+        # 寫入前再確認一次還是 done：使用者可能在這 700ms 內就送出了下一個提示，
+        # hook 已經寫進 working，這時候蓋成 idle 會讓狀態卡在錯的值到下一回合結束。
+        if ([string]$j.status -ne 'done') { return }
+        $json = @{
+            status = 'idle'
+            cwd    = [string]$j.cwd
+            ts     = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        } | ConvertTo-Json -Compress
+        # 不用 Set-Content -Encoding UTF8：PS 5.1 會寫進 BOM，而這個檔案是跟
+        # Node 寫的 status-hook.cjs 共用格式，保持無 BOM 的 UTF-8 比較保險。
+        [System.IO.File]::WriteAllText($f, $json, (New-Object System.Text.UTF8Encoding $false))
+    } catch { }
+}
+
+# 使用者是不是正看著這個 session？
+# VS Code／Cursor 的視窗標題是「<作用中分頁名> - <資料夾> - <編輯器>」，而 Claude session
+# 分頁的名稱就是對話標題，所以前景視窗標題以「<標題> - <專案>」開頭就代表正在看它。
+# 沒有對話標題的 session（剛開、還沒產生標題）無從判斷，一律當成沒被聚焦。
+function Test-SessionFocused([string]$fgTitle, [string]$convTitle, [string]$proj) {
+    if ([string]::IsNullOrWhiteSpace($fgTitle)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($convTitle) -or [string]::IsNullOrWhiteSpace($proj)) { return $false }
+    return $fgTitle.StartsWith("$convTitle - $proj", 'Ordinal')
 }
 
 # --- 列的建構 ----------------------------------------------------------------
@@ -541,23 +678,33 @@ $timer.Add_Tick({
     # 不用 Sort-Object 的 script-block 運算式（@{Expression={...}}）：在這條資料路徑上它
     # 會靜默失效、原封不動回傳輸入順序，同專案的 session 就不會排在一起。
     # Proj/SName/Started/SessId/Title 已由背景 poller 準備好，這裡只補上狀態（讀小檔，很快）。
+    $fgTitle = ''
+    try { $fgTitle = [HudWin]::ForegroundTitle() } catch { }
+
     $projected = foreach ($s in $sessions) {
+        $st = Get-SessionStatus $s.SessId
+        # 回合跑完是「已完成」，等使用者真的切過去看了才降級成「閒置」
+        if ($st -eq 'done' -and (Test-SessionFocused $fgTitle $s.Title $s.Proj)) {
+            Set-SessionIdleIfDone $s.SessId
+            $st = 'idle'
+        }
         [PSCustomObject]@{
             Proj    = $s.Proj
             SName   = $s.SName
             Started = $s.Started
             Title   = $s.Title
-            Status  = (Get-SessionStatus $s.SessId)
+            Status  = $st
         }
     }
     $ordered = @($projected | Sort-Object -Property Proj, Started)
-    $projList = New-Object System.Collections.Generic.List[string]
+    $metaList = New-Object System.Collections.Generic.List[object]
 
     foreach ($s in $ordered) {
         $proj = $s.Proj
         $row = New-SessionRow $proj $s.SName $s.Title (Format-Uptime $s.Started) $s.Status
         [void]$Rows.Children.Add($row)
-        $projList.Add($proj)
+        # 點擊要靠對話標題才找得到分頁，所以連標題一起記下來
+        $metaList.Add([PSCustomObject]@{ Proj = $proj; Title = $s.Title })
         $shown++
     }
 
@@ -565,7 +712,7 @@ $timer.Add_Tick({
     # 跨 runspace 傳來的陣列在 5.1 底下 .Count 會回 1（PSObject 包裝），但列舉是正常的。
     $HeaderText.Text = "Claude Sessions ({0})" -f $shown
     $StatusText.Text = if ($shown -eq 0) { '目前沒有執行中的 session' } else { '' }
-    $script:RowProjects = $projList.ToArray()
+    $script:RowMeta = $metaList.ToArray()
     $script:NeedResize = $true
 })
 $timer.Start()

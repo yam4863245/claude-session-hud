@@ -32,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/status-hook.cjs\" idle",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/status-hook.cjs\" done",
             "async": true,
             "timeout": 10
           }

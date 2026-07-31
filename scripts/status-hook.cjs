@@ -3,10 +3,13 @@
 // 由 ~/.claude/settings.json 的全域 hooks 呼叫，所以每個專案都會自動生效：
 //   UserPromptSubmit -> working   （開始跑）
 //   Notification     -> waiting   （等你授權／回答）
-//   Stop             -> idle      （回合結束）
+//   Stop             -> done      （回合結束、還沒回頭看）
 //   SessionEnd       -> gone      （刪掉狀態檔）
 //
-// 用法： node status-hook.cjs <working|waiting|idle|gone>
+// done 之後的 idle（閒置）不是由 hook 寫的：HUD 偵測到使用者把那個 session
+// 切到前景時，才自己把狀態降級成 idle。這裡沒有對應的事件可以掛。
+//
+// 用法： node status-hook.cjs <working|waiting|done|idle|gone>
 // hook 的 JSON payload 由 stdin 進來，其中 session_id 對應
 // `claude agents --json` 回傳的 sessionId。
 

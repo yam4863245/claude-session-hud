@@ -8,7 +8,7 @@
     {
       "name": "session-hud",
       "source": "./",
-      "description": "懸浮顯示所有正在執行的 Claude Code session（跨全部專案），含對話標題與忙碌／等待／閒置狀態。Windows 專用。",
+      "description": "懸浮顯示所有正在執行的 Claude Code session（跨全部專案），含對話標題與執行中／等你／已完成／閒置狀態。Windows 專用。",
       "category": "productivity",
       "keywords": ["hud", "overlay", "sessions", "status", "windows"]
     }
