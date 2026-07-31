@@ -595,11 +595,12 @@ function Apply-PendingResize {
 $script:StatusDir = Join-Path $env:USERPROFILE '.claude\session-status'
 
 $STATUS_STYLE = @{
-    working = @{ Color = '#FF9ECE6A'; Label = '執行中' }
-    waiting = @{ Color = '#FFE0AF68'; Label = '等你'   }
-    done    = @{ Color = '#FF7AA2F7'; Label = '已完成' }
-    idle    = @{ Color = '#FF6E7681'; Label = '閒置'   }
-    unknown = @{ Color = '#FF3F3F48'; Label = '未知'   }
+    working = @{ Color = '#FF9ECE6A'; Label = '執行中'       }
+    asking  = @{ Color = '#FFBB9AF7'; Label = '需要我做決定' }
+    waiting = @{ Color = '#FFE0AF68'; Label = '等你'         }
+    done    = @{ Color = '#FF7AA2F7'; Label = '已完成'       }
+    idle    = @{ Color = '#FF6E7681'; Label = '閒置'         }
+    unknown = @{ Color = '#FF3F3F48'; Label = '未知'         }
 }
 
 function Get-SessionStatus([string]$sessionId) {
@@ -636,21 +637,29 @@ function Set-SessionIdleIfDone([string]$sessionId) {
     } catch { }
 }
 
-# --- 完成音效 ----------------------------------------------------------------
+# --- 音效通知 ----------------------------------------------------------------
 # 用 SystemSounds 而不是自己指定 .wav：它跟著 Windows 的音效配置走，
 # 使用者把配置調成「無音效」時自然就安靜，不必在這裡另外做開關。
-# 不想要的話把下面這行改成 $false。
-$SOUND_ON_DONE = $true
+# 不想要的話把下面兩行改成 $false。
+$SOUND_ON_DONE   = $true   # 回合跑完
+$SOUND_ON_ASKING = $true   # Claude 丟問題出來等你決定
 
 $script:PrevStatus   = @{}      # sessionId -> 上一輪的原始狀態
 $script:StatusSeeded = $false   # 第一輪只記錄不發聲，否則 HUD 一開就把既有的 done 全部叫一遍
 
-function Invoke-DoneSound {
-    if (-not $SOUND_ON_DONE) { return }
-    # Play() 是非同步的，不會卡住 UI 執行緒
+# 兩件事用不同的系統音，不用看畫面就分得出是「做完了」還是「在問你」。
+# Exclamation 比 Asterisk 更尖，剛好對應「這件事會卡住不動」。
+function Invoke-StatusSound([string]$kind) {
     try {
-        [System.Media.SystemSounds]::Asterisk.Play()
-        Write-Diag ("SOUND {0}" -f [DateTime]::Now.ToString('HH:mm:ss'))
+        if ($kind -eq 'asking') {
+            if (-not $SOUND_ON_ASKING) { return }
+            [System.Media.SystemSounds]::Exclamation.Play()
+        } else {
+            if (-not $SOUND_ON_DONE) { return }
+            [System.Media.SystemSounds]::Asterisk.Play()
+        }
+        # Play() 是非同步的，不會卡住 UI 執行緒
+        Write-Diag ("SOUND {0} {1}" -f $kind, [DateTime]::Now.ToString('HH:mm:ss'))
     } catch { }
 }
 
@@ -866,12 +875,16 @@ $timer.Add_Tick({
 
     $fresh = @{}
     $playDone = $false
+    $playAsk  = $false
 
     $projected = foreach ($s in $sessions) {
         $st = Get-SessionStatus $s.SessId
         # 音效看的是「還沒降級的原始狀態」：一個回合跑完了就是跑完了，
         # 不該因為使用者剛好正看著那個視窗就變成沒完成。
-        if ($StatusSeeded -and $st -eq 'done' -and $PrevStatus[$s.SessId] -ne 'done') { $playDone = $true }
+        if ($StatusSeeded -and $PrevStatus[$s.SessId] -ne $st) {
+            if ($st -eq 'done')   { $playDone = $true }
+            if ($st -eq 'asking') { $playAsk  = $true }
+        }
         $fresh[$s.SessId] = $st
         # 回合跑完是「已完成」，等使用者真的切過去看了才降級成「閒置」
         if ($st -eq 'done' -and (Test-SessionFocused $fgTitle $s.Title $s.Proj)) {
@@ -889,8 +902,10 @@ $timer.Add_Tick({
     # 整個換掉而不是逐筆更新：關掉的 session 就自動從表裡消失，不用另外清理
     $script:PrevStatus   = $fresh
     $script:StatusSeeded = $true
-    # 同一輪有好幾個 session 一起完成時只響一次，不要疊在一起
-    if ($playDone) { Invoke-DoneSound }
+    # 同一輪有好幾個 session 一起變動時各只響一次，不要疊在一起。
+    # 兩種同時發生就只響「在問你」那個——它會卡住不動，比較急。
+    if ($playAsk) { Invoke-StatusSound 'asking' }
+    elseif ($playDone) { Invoke-StatusSound 'done' }
 
     $ordered = @($projected | Sort-Object -Property Proj, Started)
     $metaList = New-Object System.Collections.Generic.List[object]

@@ -41,8 +41,12 @@ claude plugin update session-hud
    - 背景 runspace（MTA）每 3 秒跑 `claude agents --json`，並讀轉錄檔取對話標題；**所有磁碟 I/O 都在這裡**。
    - UI 執行緒的 `DispatcherTimer`（700ms）只讀共享的 synchronized hashtable `$Sync` 並重畫。
    - 「一輪加列、下一輪才依量到的高度調視窗」是刻意的兩段式，見 `Apply-PendingResize` 的註解。
-2. **狀態 hooks**（[hooks/hooks.json](hooks/hooks.json) → [scripts/status-hook.cjs](scripts/status-hook.cjs)）—— 四個全域事件寫 / 刪 `~/.claude/session-status/<sessionId>.json`。
-   `UserPromptSubmit`=working、`Notification`=waiting、`Stop`=done、`SessionEnd`=gone。
+2. **狀態 hooks**（[hooks/hooks.json](hooks/hooks.json) → [scripts/status-hook.cjs](scripts/status-hook.cjs)）—— 全域事件寫 / 刪 `~/.claude/session-status/<sessionId>.json`。
+   `UserPromptSubmit`=working、`PreToolUse[AskUserQuestion]`=asking、`PostToolUse[AskUserQuestion]`=working、
+   `Notification`=waiting、`Stop`=done、`SessionEnd`=gone。
+   `asking`（需要我做決定）跟 `waiting`（等你）分開是刻意的：waiting 多半按個同意就過了，
+   asking 是真的要你判斷，所以顏色不同、而且會出聲。用 `PreToolUse` 配 tool 名而不是解析
+   `Notification` 的 message 字串——後者是給人看的文案，隨時會改。
 
 串起兩邊的 key 是 `claude agents --json` 的 `sessionId`，也就是 hook payload 的 `session_id`。
 沒有狀態檔 = `unknown`，不是錯誤。
@@ -54,10 +58,16 @@ claude plugin update session-hud
 轉錄檔路徑是從 cwd 推導的，推導失敗時真的 session 也會找不到檔案。
 這個過濾是自我修正的 —— 使用者一在那個分頁開始對話，它就會自己冒出來。
 
-**完成音效也在 HUD 這邊**（`Invoke-DoneSound`），不在 hook 裡 —— HUD 本來就有狀態機，
-抓得到「上一輪不是 done、這一輪是 done」那一刻。兩個必要條件：**第一輪只記錄不發聲**
+**音效也在 HUD 這邊**（`Invoke-StatusSound`），不在 hook 裡 —— HUD 本來就有狀態機，
+抓得到「上一輪不是 X、這一輪是 X」那一刻。兩個必要條件：**第一輪只記錄不發聲**
 （否則 HUD 一開就把既有的 done 全部叫一遍），以及**比對的是降級前的原始狀態**
 （回合跑完就是跑完，不該因為使用者剛好正看著就變成沒完成）。
+done 用 Asterisk、asking 用 Exclamation，同一輪兩者都發生時只響 asking（它會卡住不動，比較急）。
+
+驗證 hook 有沒有真的被觸發，用 `claude -p --plugin-dir <臨時副本>` 跑一個 headless session，
+**不要**讓臨時 hook 也寫狀態檔 —— 已安裝的外掛還是全域生效，它的 `Stop` 會在最後蓋掉你剛寫的值，
+看起來就像沒觸發。讓臨時 hook 寫獨立的標記檔才分得出來。
+另外 `--allowedTools` 是可變長度參數，會把後面的 prompt 一起吃掉，prompt 要走 stdin。
 
 **`idle` 不是 hook 寫的**（沒有「使用者看了」這種事件）。HUD 每輪比對前景視窗標題，
 發現使用者正看著某個 `done` 的 session 就自己把檔案降級成 `idle` —— 這是唯一由 HUD 寫入狀態檔的地方。

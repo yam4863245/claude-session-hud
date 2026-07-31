@@ -32,16 +32,24 @@
 | 狀態 | 什麼時候 |
 |---|---|
 | **執行中** | 你送出提示後，Claude 正在跑（狀態文字右邊有持續旋轉的圈圈） |
-| **等你** | 卡在授權或提問上 |
+| **需要我做決定** | Claude 丟了選項出來等你選 |
+| **等你** | 卡在權限授權等一般提示上 |
 | **已完成** | 回合跑完了，但你還沒回頭看 |
 | **閒置** | 跑完而且你已經看過了 |
 | **未知** | 這個 session 在 hooks 裝好之前就開著了 |
 
 「已完成」會在你把那個 session 切到前景時自動變成「閒置」，所以掃一眼 HUD 就知道哪些回合還沒收。
 
-**回合完成時會播一次 Windows 通知音**（系統的「星號」音效）。它跟著 Windows 的音效配置走，所以在
-「設定 → 系統 → 音效 → 更多音效設定」把配置改成「無音效」就會安靜；只想關 HUD 這一個的話，
-把 `scripts/session-hud.ps1` 裡的 `$SOUND_ON_DONE` 改成 `$false`。
+**兩種情況會播 Windows 通知音**，而且用不同的音，不看畫面也分得出來：
+
+| 什麼時候 | 音效 |
+|---|---|
+| 回合跑完（→ 已完成） | 系統「星號」 |
+| Claude 丟問題出來（→ 需要我做決定） | 系統「驚嘆號」 |
+
+音效跟著 Windows 的音效配置走，所以在「設定 → 系統 → 音效 → 更多音效設定」把配置改成「無音效」
+就會全部安靜；只想關 HUD 這邊的話，把 `scripts/session-hud.ps1` 裡的 `$SOUND_ON_DONE` /
+`$SOUND_ON_ASKING` 改成 `$false`。
 
 ## 需求
 
@@ -77,7 +85,7 @@ claude plugin install session-hud
 | `scripts/session-hud.ps1` | HUD 本體。背景 runspace 每 3 秒跑 `claude agents --json`，UI 執行緒只負責繪製 |
 | ↳ 佔位行程過濾 | VS Code 外掛會預先開好備用的 `claude` 行程，它們會出現在 `claude agents --json` 裡但沒有任何對話 —— 沒有轉錄檔也沒有狀態檔的一律不列出 |
 | `scripts/status-hook.cjs` | 由 hooks 呼叫，把狀態寫到 `~/.claude/session-status/<sessionId>.json` |
-| `hooks/hooks.json` | 四個全域事件 → 狀態：`UserPromptSubmit`=執行中、`Notification`=等你、`Stop`=已完成、`SessionEnd`=刪除 |
+| `hooks/hooks.json` | 全域事件 → 狀態：`UserPromptSubmit`=執行中、`PreToolUse[AskUserQuestion]`=需要我做決定、`PostToolUse[AskUserQuestion]`=執行中、`Notification`=等你、`Stop`=已完成、`SessionEnd`=刪除 |
 | `scripts/start-hud.vbs` | 無主控台啟動器 |
 
 **對話標題**取自轉錄檔 `~/.claude/projects/<正規化cwd>/<sessionId>.jsonl` 裡最後一筆
