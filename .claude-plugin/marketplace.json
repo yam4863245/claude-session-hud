@@ -1,0 +1,16 @@
+{
+  "name": "session-hud",
+  "owner": {
+    "name": "yam4863245"
+  },
+  "description": "Claude Session HUD —— 跨專案的 Claude Code session 懸浮監看視窗。",
+  "plugins": [
+    {
+      "name": "session-hud",
+      "source": "./",
+      "description": "懸浮顯示所有正在執行的 Claude Code session（跨全部專案），含對話標題與忙碌／等待／閒置狀態。Windows 專用。",
+      "category": "productivity",
+      "keywords": ["hud", "overlay", "sessions", "status", "windows"]
+    }
+  ]
+}

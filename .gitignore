@@ -1,0 +1,4 @@
+# 執行期產物（正常情況會寫到 ~/.claude/session-hud/，這裡只是保險）
+hud-pos.json
+layout-diag.log
+hud.log
