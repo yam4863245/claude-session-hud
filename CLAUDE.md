@@ -123,7 +123,8 @@ done 用 Asterisk、asking 用 Exclamation，同一輪兩者都發生時只響 a
 
 ## 驗證 HUD 的方式
 
-- **一般截圖抓不到 HUD**（`CopyFromScreen` 走 BitBlt，看不到 WPF layered 透明視窗，全螢幕截圖會是空的）。要看畫面用 `PrintWindow(hwnd, hdc, 2)`（`PW_RENDERFULLCONTENT`）。
+- **一般截圖抓不到 HUD**（`CopyFromScreen` 走 BitBlt，連 `CAPTUREBLT` 也一樣，看不到 WPF layered 透明視窗，全螢幕截圖會是空的）。要看畫面用 `PrintWindow(hwnd, hdc, 2)`（`PW_RENDERFULLCONTENT`）。
+- **但 PrintWindow 的像素「座標」不能拿來推點擊位置**。它是照 `TransformToDevice` 的 scale 重新渲染（125% 下 430px 寬、元素在 DIP×1.25 處）；實際的分層表面卻是 1:1 DIP 渲染 —— 用 `WindowFromPoint` 掃邊界實測，可命中區恰好是 `Width/scale × 內容DIP高`（430×471 的視窗矩形只有左上 344×338 可點）。憑 PrintWindow 截圖算出的「可見位置」去合成點擊，會點進矩形右側/下緣的穿透區、直接打到底下別的應用程式。要推元素的實際位置：拿 `TranslatePoint` 的 DIP 值「不乘 scale」，或用 `WindowFromPoint` 掃描驗證。
 - **不要用肉眼估版面尺寸**。遇到排版問題先看 `~/.claude/session-hud/layout-diag.log`（每次啟動重建），需要更多數字就先加 `Write-Diag` 再說。
 - **session 數量會一直變動**（使用者同時開很多個）。「掃描座標 → 點擊」這種驗證要放在同一次執行裡，否則座標會過期並得到誤導性的失敗。
 

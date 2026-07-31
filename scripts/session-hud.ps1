@@ -366,10 +366,14 @@ $poller.Runspace = $rs
       <Grid x:Name="HeaderBar" Grid.Row="0" Background="#00000000" Margin="12,9,8,7">
         <TextBlock x:Name="HeaderText" Text="Claude Sessions" Foreground="#FFE8E8EC"
                    FontFamily="Segoe UI" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"/>
-        <TextBlock x:Name="CloseBtn" Text="&#x2715;" Foreground="#FF8A8A93" FontFamily="Segoe UI" FontSize="12"
-                   HorizontalAlignment="Right" VerticalAlignment="Center" Cursor="Hand" Padding="6,2"/>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+          <TextBlock x:Name="MinBtn" Text="&#x2500;" Foreground="#FF8A8A93" FontFamily="Segoe UI" FontSize="12"
+                     VerticalAlignment="Center" Cursor="Hand" Padding="6,2"/>
+          <TextBlock x:Name="CloseBtn" Text="&#x2715;" Foreground="#FF8A8A93" FontFamily="Segoe UI" FontSize="12"
+                     VerticalAlignment="Center" Cursor="Hand" Padding="6,2"/>
+        </StackPanel>
       </Grid>
-      <Border Grid.Row="1" Height="1" Background="#22FFFFFF" Margin="10,0,10,4"/>
+      <Border x:Name="HeaderDivider" Grid.Row="1" Height="1" Background="#22FFFFFF" Margin="10,0,10,4"/>
       <ScrollViewer x:Name="RowScroll" Grid.Row="2" VerticalAlignment="Top" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <StackPanel x:Name="Rows" Margin="6,2,6,0"/>
       </ScrollViewer>
@@ -397,7 +401,9 @@ $win    = [Windows.Markup.XamlReader]::Load($reader)
 
 $HeaderBar  = $win.FindName('HeaderBar')
 $HeaderText = $win.FindName('HeaderText')
+$MinBtn     = $win.FindName('MinBtn')
 $CloseBtn   = $win.FindName('CloseBtn')
+$HeaderDivider = $win.FindName('HeaderDivider')
 $Rows       = $win.FindName('Rows')
 $RowScroll  = $win.FindName('RowScroll')
 $RootBorder = $win.FindName('RootBorder')
@@ -428,6 +434,45 @@ if (Test-Path $PosFile) {
 
 $HeaderBar.Add_MouseLeftButtonDown({ $win.DragMove() })
 $CloseBtn.Add_MouseLeftButtonUp({ $win.Close() })
+
+# --- 縮小化：只留標題列 --------------------------------------------------------
+# 收合的是「標題列以下的所有東西」而不是把視窗藏起來——縮起來還是看得到 session 數
+# 與各種聲音通知，只是不占畫面。UsageBar 平常由 Update-UsageFooter 每 tick 控制顯示，
+# 所以收合時那邊也要一起停手（見該函式開頭的 guard），否則 700ms 後又會被翻回 Visible。
+$script:Collapsed = $false
+function Toggle-Collapsed {
+    try {
+        $script:Collapsed = -not $Collapsed
+        $vis = if ($Collapsed) { 'Collapsed' } else { 'Visible' }
+        $HeaderDivider.Visibility = $vis
+        $RowScroll.Visibility     = $vis
+        $StatusText.Visibility    = $vis
+        # 展開時不直接設 Visible：有沒有用量資料是 Update-UsageFooter 說了算，交還給它
+        if ($Collapsed) { $UsageBar.Visibility = 'Collapsed' }
+        $MinBtn.Text = if ($Collapsed) { [string][char]0x25A1 } else { [string][char]0x2500 }
+        # 排版跟視窗高度互相牽制：WPF 把目前的 Height（實體像素）當成 DIP 上限來量內容，
+        # 所以「量內容→設高度」一次只能把視窗撐大 1.25 倍（見 layout-diag 裡的逐 tick 收斂）。
+        # 靠 timer 每 700ms 走一步的話，展開要好幾秒才長回全高——這裡直接迭代到定點，一次到位。
+        $prevH = -1.0
+        for ($i = 0; $i -lt 12 -and $win.Height -ne $prevH; $i++) {
+            $prevH = $win.Height
+            $win.UpdateLayout()
+            Apply-PendingResize
+        }
+        Write-Diag ("TOGGLE collapsed={0} winH={1}" -f $Collapsed, $win.Height)
+    } catch { Write-Diag ("TOGGLE 例外: {0}" -f $_.Exception.Message) }
+}
+
+# 用 Preview（隧道）而不是 MouseLeftButtonUp：Down 一旦冒泡到 HeaderBar 就會觸發 DragMove()，
+# 它的模態移動迴圈可能把接下來的 MouseUp 吃掉。Preview 比 HeaderBar 先拿到事件，
+# 標成 Handled 就不會進 DragMove，收合也立刻發生。
+$MinBtn.Add_PreviewMouseLeftButtonDown({
+    param($s, $e)
+    try {
+        $e.Handled = $true
+        Toggle-Collapsed
+    } catch { Write-Diag ("MINBTN 例外: {0}" -f $_.Exception.Message) }
+})
 
 # --- 透明度：平常淡淡的一片，滑鼠移上去才變清楚 --------------------------------
 # 這是個永遠置頂的視窗，長時間壓在別的內容上面，所以預設要夠透明才不礙事。
@@ -477,6 +522,9 @@ $win.Add_ContentRendered({
 # 兩者差一個 scale，結果就是「點第 5 列會觸發第 6 列」，最後一列則完全點不到。
 $win.Add_MouseLeftButtonUp({
     try {
+        # 縮小模式下列區根本沒畫出來，但 RowsTopPx/RowPitchPx 還留著收合前的舊值，
+        # 不擋掉的話點標題列附近會誤中一個看不見的列
+        if ($Collapsed) { return }
         if ($RowPitchPx -le 0 -or $RowMeta.Count -eq 0) { return }
         if ($HudHwnd -eq [IntPtr]::Zero) { return }
         $pt = New-Object HudWin+POINT
@@ -520,11 +568,7 @@ $script:NeedResize = $false
 # 慢一個 tick 對使用者是看不出來的，但數字保證正確。
 # 每輪都跑，只在高度真的不對時才調整——自我校正，就算某輪排版值還沒穩定，下一輪也會收斂。
 function Apply-PendingResize {
-    # ExtentHeight = ScrollViewer 的「內容總高」，是唯一不受目前 viewport 影響的權威值。
-    # Rows.ActualHeight 會被 viewport 夾住（等於可視區高度），拿它算會永遠少一列。
     if ($LastStamp -eq -1) { return }   # 還沒收到第一筆資料，別先縮成最小高度閃一下
-    $ext = $RowScroll.ExtentHeight      # 內容總高，單位是 DIP（邏輯單位）
-    if ($ext -le 0) { return }
 
     # 單位陷阱：在這個宿主底下 Window.Height 設多少就是多少「實體像素」，
     # 但 WPF 的排版量測值（ExtentHeight／ViewportHeight）是 DIP。
@@ -543,6 +587,25 @@ function Apply-PendingResize {
     if ([double]::IsNaN($RootBorder.Width) -or [Math]::Abs($rootDip - $RootBorder.Width) -gt 1) {
         $RootBorder.Width = $rootDip
     }
+
+    # 縮小模式：列區是 Collapsed、不參與排版，ExtentHeight 那條路整個不可靠，
+    # 直接量根 Border 的高度（它靠上對齊、沒指定 Height，量到的就是標題列所需高度）。
+    # 也不套一般模式的 96px 下限——那個下限是列區存在時用的，這裡就是要縮到比它小。
+    if ($Collapsed) {
+        $contentDip = $RootBorder.ActualHeight
+        if ($contentDip -le 0) { return }
+        $target = $contentDip * $scale
+        if ([Math]::Abs($target - $win.Height) -le 1) { return }
+        Write-Diag ("collapsed scale={0} contentDip={1} winH={2} -> {3}" -f $scale, $contentDip, $win.Height, $target)
+        $win.Height = $target
+        Clamp-ToWorkArea
+        return
+    }
+
+    # ExtentHeight = ScrollViewer 的「內容總高」，是唯一不受目前 viewport 影響的權威值。
+    # Rows.ActualHeight 會被 viewport 夾住（等於可視區高度），拿它算會永遠少一列。
+    $ext = $RowScroll.ExtentHeight      # 內容總高，單位是 DIP（邏輯單位）
+    if ($ext -le 0) { return }
 
     # 高度不指定，改讓根 Border 自己長到內容需要的高度（見下面取 ActualHeight 的地方）。
     # 縱向的 DPI 錯配比橫向陰險：WPF 把 Window.ActualHeight（實體像素的數字）當成 DIP，
@@ -818,6 +881,8 @@ function Format-Uptime([double]$startedAtMs) {
 # 所以超過 15 分鐘就把「幾分鐘前」寫在標籤上——寧可顯得囉唆，也不要讓人以為是即時值。
 function Update-UsageFooter {
     try {
+        # 縮小模式：整條 footer 已被收起來，這裡不能再把 Visibility 翻回 Visible
+        if ($Collapsed) { return }
         $u = $Sync.Usage
         if (-not $u) { $UsageBar.Visibility = 'Collapsed'; return }
         $UsageBar.Visibility = 'Visible'
