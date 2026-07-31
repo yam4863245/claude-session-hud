@@ -73,6 +73,12 @@ claude plugin update session-hud
 切換只有 `SelectionItemPattern.Select()` 可用；**讀 `IsSelected` 回來的值慢一拍**，
 拿它驗證會誤判成沒切成功。UIA 掃一次樹 ~100ms，只准在點擊時做，不要放進輪詢迴圈。
 
+底部的 5 小時用量讀 `~/.claude.json` 的 `cachedUsageUtilization.utilization.five_hour`，
+那是唯一拿得到這個數字的地方（CLI 沒有 usage 指令，轉錄檔只有 per-message 的 token 數，換算不出百分比）。
+**只能用 regex 挑出 `"five_hour":{...}` 那一段來解析，整份 `ConvertFrom-Json` 在 PS 5.1 會直接拋例外** ——
+那個檔的 `projects` 底下會同時存在只差大小寫的重複鍵（`c:/...` 與 `C:/...`）。
+它是 Claude Code 自己的快取，我們叫不動它更新（實測可落後兩小時以上），所以超過 15 分鐘要在畫面上標示「幾分鐘前」。
+
 執行期檔案一律寫 `~/.claude/`（`session-status/`、`session-hud/hud-pos.json`、`session-hud/layout-diag.log`），**不寫回腳本目錄** —— 外掛更新會整個換掉快取目錄。
 
 **hooks 跑的是已安裝的快取副本，不是這個 repo。** 改完 `hooks/` 或 `status-hook.cjs` 要 `claude plugin update session-hud` 才生效；HUD 本體則是你啟動哪個路徑就跑哪個。
@@ -82,6 +88,14 @@ claude plugin update session-hud
 這些是實測踩出來的，**改動前先讀 [README.md](README.md) 的「開發筆記」與程式碼裡的長註解**，不要重新推理：
 
 - **DPI 單位錯配**：`Window.Width/Height` 是實體像素，`ExtentHeight`／`ActualWidth` 是 DIP，兩軸都要乘 `scale`。
+- **版面裡不能有「填滿剩餘空間」的元素**（`Height="*"`、`VerticalAlignment="Stretch"`）。
+  WPF 把 325（實體像素）當成 325 DIP 排版，但看得到的只有 260 DIP，多出來的 65 DIP
+  會被那個元素吃掉，排在它下面的東西**整條被推到視窗外**——不是裁一半，是完全消失，
+  而且 `IsVisible` 還是 `True`、`ActualHeight` 也正常，只有量 `TranslatePoint` 到視窗的 Y 才看得出來。
+  全部改成 `Auto` + `MaxHeight`、根 Border 加 `VerticalAlignment="Top"`。
+- **視窗高度不要用「剩餘空間」反推**（`win.ActualHeight - viewport`）：viewport 是 `win.Height` 決定的，
+  拿結果推原因會震盪（實測 250↔400 來回）或崩塌（37.8 → 3.2 → 12.0 → 9.8）。
+  改讀「靠上對齊、沒指定 Height 的根 Border」的 `ActualHeight`，那才是內容真正需要的高度。
 - **命中測試偏移**：列的點擊不綁在列元素上，改由視窗層用實體螢幕座標算索引（`$RowsTopPx` / `$RowPitchPx`）。
 - **WPF 事件處理器會靜默吞例外**：handler 內一律自己 try/catch 並 `Write-Diag`。
 - **跨 runspace 陣列會被包成單一元素**：`.Count` 回 1、`foreach` 只跑一圈 —— 一律先過 `Expand-Sessions`。

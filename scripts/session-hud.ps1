@@ -197,6 +197,7 @@ $script:Sync = [hashtable]::Synchronized(@{
     Sessions = @()
     Error    = $null
     Stamp    = 0
+    Usage    = $null
 })
 
 $poller = [powershell]::Create()
@@ -250,7 +251,51 @@ $poller.Runspace = $rs
         return ''
     }
 
+    # 5 小時用量：Claude Code 把 /usage 的結果快取在 ~/.claude.json 的
+    # cachedUsageUtilization.utilization.five_hour，這是唯一拿得到這個數字的地方
+    # （CLI 沒有 usage 指令，轉錄檔裡也只有 per-message 的 token 數，換算不出百分比）。
+    $usageFile  = Join-Path $env:USERPROFILE '.claude.json'
+    $usageCache = @{ Stamp = ''; Value = $null }
+
+    function Get-UsageFiveHour([string]$path) {
+        # 只用 regex 挑出 "five_hour":{...} 那一小段再解析，不整份 ConvertFrom-Json。
+        # 不是為了效能，是因為整份「解不開」：這個檔的 projects 底下會同時存在
+        # "c:/..." 與 "C:/..." 這種只差大小寫的重複鍵，PS 5.1 的 ConvertFrom-Json 直接拋例外。
+        # five_hour 物件內部是扁平的（沒有巢狀大括號），所以 [^}]* 就夠了；
+        # 哪天格式變了就比對不到，回 $null、footer 自己隱藏，不會壞掉。
+        try {
+            # 必須 FileShare.ReadWrite——Claude Code 隨時可能在寫這個檔
+            $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open,
+                    [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
+            try { $raw = $sr.ReadToEnd() } finally { $sr.Dispose(); $fs.Dispose() }
+
+            $m = [regex]::Match($raw, '"five_hour"\s*:\s*(\{[^}]*\})')
+            if (-not $m.Success) { return $null }
+            $o = $m.Groups[1].Value | ConvertFrom-Json
+            $f = [regex]::Match($raw, '"fetchedAtMs"\s*:\s*(\d+)')
+            return @{
+                Pct       = [int]$o.utilization
+                ResetsAt  = [string]$o.resets_at
+                FetchedAt = $(if ($f.Success) { [double]$f.Groups[1].Value } else { 0.0 })
+            }
+        } catch { return $null }
+    }
+
     while ($true) {
+        try {
+            # 這個檔 60KB+ 且很常被寫入，用「長度＋修改時間」當快取鍵免得每 3 秒重讀
+            $ufi = New-Object System.IO.FileInfo $usageFile
+            if ($ufi.Exists) {
+                $ustamp = "$($ufi.Length):$($ufi.LastWriteTimeUtc.Ticks)"
+                if ($usageCache.Stamp -ne $ustamp) {
+                    $usageCache.Value = Get-UsageFiveHour $usageFile
+                    $usageCache.Stamp = $ustamp
+                }
+                $Sync.Usage = $usageCache.Value
+            }
+        } catch { }
+
         try {
             $raw = & $ClaudeExe agents --json 2>$null | Out-String
             $list = if ($raw.Trim()) { @($raw | ConvertFrom-Json) } else { @() }
@@ -309,12 +354,13 @@ $poller.Runspace = $rs
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         Topmost="True" ShowInTaskbar="False" Height="200"
         Width="320" ResizeMode="NoResize">
-  <Border x:Name="RootBorder" HorizontalAlignment="Left" CornerRadius="10" Background="#F21B1B1F" BorderBrush="#33FFFFFF" BorderThickness="1">
+  <Border x:Name="RootBorder" HorizontalAlignment="Left" VerticalAlignment="Top" CornerRadius="10" Background="#F21B1B1F" BorderBrush="#33FFFFFF" BorderThickness="1">
     <Grid Margin="0,0,0,8">
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto"/>
         <RowDefinition Height="Auto"/>
-        <RowDefinition Height="*"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
         <RowDefinition Height="Auto"/>
       </Grid.RowDefinitions>
       <Grid x:Name="HeaderBar" Grid.Row="0" Background="#00000000" Margin="12,9,8,7">
@@ -324,11 +370,23 @@ $poller.Runspace = $rs
                    HorizontalAlignment="Right" VerticalAlignment="Center" Cursor="Hand" Padding="6,2"/>
       </Grid>
       <Border Grid.Row="1" Height="1" Background="#22FFFFFF" Margin="10,0,10,4"/>
-      <ScrollViewer x:Name="RowScroll" Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+      <ScrollViewer x:Name="RowScroll" Grid.Row="2" VerticalAlignment="Top" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <StackPanel x:Name="Rows" Margin="6,2,6,0"/>
       </ScrollViewer>
       <TextBlock x:Name="StatusText" Grid.Row="3" Text="" Foreground="#FF6E6E77" FontFamily="Microsoft JhengHei UI, Microsoft YaHei UI, Meiryo UI, Segoe UI" FontSize="10"
                  Margin="12,6,12,0" TextWrapping="Wrap"/>
+      <StackPanel x:Name="UsageBar" Grid.Row="4" Margin="12,6,12,0" Visibility="Collapsed">
+        <Border Height="1" Background="#18FFFFFF" Margin="0,0,0,6"/>
+        <DockPanel LastChildFill="False">
+          <TextBlock x:Name="UsageLabel" DockPanel.Dock="Left" Text="5 小時用量" Foreground="#FF7A7A85"
+                     FontFamily="Microsoft JhengHei UI, Microsoft YaHei UI, Meiryo UI, Segoe UI" FontSize="10"/>
+          <TextBlock x:Name="UsageValue" DockPanel.Dock="Right" Text="" Foreground="#FFB9BAC4"
+                     FontFamily="Microsoft JhengHei UI, Microsoft YaHei UI, Meiryo UI, Segoe UI" FontSize="10"/>
+        </DockPanel>
+        <Border x:Name="UsageTrack" Height="3" CornerRadius="2" Background="#22FFFFFF" Margin="0,4,0,0">
+          <Border x:Name="UsageFill" HorizontalAlignment="Left" Width="0" CornerRadius="2" Background="#FF7AA2F7"/>
+        </Border>
+      </StackPanel>
     </Grid>
   </Border>
 </Window>
@@ -344,6 +402,11 @@ $Rows       = $win.FindName('Rows')
 $RowScroll  = $win.FindName('RowScroll')
 $RootBorder = $win.FindName('RootBorder')
 $StatusText = $win.FindName('StatusText')
+$UsageBar   = $win.FindName('UsageBar')
+$UsageLabel = $win.FindName('UsageLabel')
+$UsageValue = $win.FindName('UsageValue')
+$UsageTrack = $win.FindName('UsageTrack')
+$UsageFill  = $win.FindName('UsageFill')
 
 # 排版診斷：把每次調整高度用到的數字寫出來，方便驗證真的抓對了。
 $script:DiagFile = Join-Path $StateDir 'layout-diag.log'
@@ -446,8 +509,7 @@ $win.Add_MouseLeftButtonUp({
 # 不用 SizeToContent="Height"：實測在 AllowsTransparency + NoResize 這個組合下，
 # 首次排版後就不再跟著內容變高，第 6 筆之後的 session 會看不到。
 $MAX_H    = 620
-$CHROME   = 62    # 標題列＋分隔線＋狀態列＋邊距
-$ROW_H    = 50    # 只在量測失敗時當備援
+$CHROME   = 102   # 標題列＋分隔線＋狀態列＋用量列＋邊距（DIP）；只在量測失敗時當備援
 $DESIGN_W = 430   # 設計寬度；Window.Width 與根 Border 的 MaxWidth 都取這個數（標題較長，需要空間）
 
 $script:NeedResize = $false
@@ -482,6 +544,14 @@ function Apply-PendingResize {
         $RootBorder.Width = $rootDip
     }
 
+    # 高度不指定，改讓根 Border 自己長到內容需要的高度（見下面取 ActualHeight 的地方）。
+    # 縱向的 DPI 錯配比橫向陰險：WPF 把 Window.ActualHeight（實體像素的數字）當成 DIP，
+    # 於是它以為有 325 DIP 可用、實際看得到的只有 325/1.25 = 260 DIP。
+    # 只要版面裡還有會吃掉剩餘空間的東西（原本 Height="*" 的 ScrollViewer），
+    # 多出來的 65 DIP 就會被它吃掉，排在下面的東西整條被推到視窗外——不是裁一半，是完全看不到。
+    # 所以列區改成 Auto + MaxHeight、根 Border 改成 VerticalAlignment="Top"：
+    # 版面裡沒有任何「填滿剩餘空間」的元素，就不會被那個假的高度騙。
+
     # 順便更新點擊要用的列區幾何（實體像素），每輪都算，不受下面的提前 return 影響。
     $n = $Rows.Children.Count
     if ($n -gt 0) {
@@ -492,24 +562,28 @@ function Apply-PendingResize {
         } catch { }
     }
 
-    # chrome 全部在 DIP 世界裡算，最後才換算成實體像素。
-    # 絕對不能用 (win.Height - viewport) 反推：viewport 是由 win.Height 決定的，
-    # 會形成回饋迴圈——實測 chrome 會一路崩塌成 37.8 → 3.2 → 12.0 → 9.8，視窗越縮越小。
-    # 這裡改用「不參照 win.Height」的量法：上緣偏移＋下方剩餘，兩者都只跟版面有關。
-    $topDip = 0.0
-    try {
-        $origin2 = [System.Windows.Point]::new([double]0, [double]0)
-        $topDip = ($RowScroll.TranslatePoint($origin2, $win)).Y
-    } catch { }
-    $botDip = $win.ActualHeight - $topDip - $RowScroll.ActualHeight
-    if ($botDip -lt 0) { $botDip = 0 }
-    $chromeDip = $topDip + $botDip
-    if ($chromeDip -le 0 -or $chromeDip -gt 200) { $chromeDip = $CHROME }
+    # 視窗高度直接取「根 Border 量出來的高度」，不再用剩餘空間反推。
+    # RootBorder 是 VerticalAlignment="Top" 且沒有指定 Height，所以它的 ActualHeight
+    # 就是內容真正需要的 DIP 高度，跟 win.Height 完全無關 —— 沒有回饋迴圈。
+    # 反推過的兩種寫法都壞掉：用 (win.ActualHeight - viewport) 會讓 chrome 一路崩塌成
+    # 37.8 → 3.2 → 12.0 → 9.8 越縮越小；改成 DIP 一致後又變成 250↔400 來回震盪不收斂。
+    # 因為 viewport 本來就是 win.Height 決定的，任何形式的反推都是拿結果推原因。
+    $contentDip = $RootBorder.ActualHeight
+    if ($contentDip -le 0) { return }
 
-    $target = [Math]::Max(96, [Math]::Min($MAX_H, ($ext + $chromeDip) * $scale))
+    # chrome = 根 Border 高度扣掉列區。兩個都是內容驅動的 DIP，相減是固定值。
+    # 拿它換算列區的高度上限，視窗才停得住在 MAX_H（列區改 Auto 後沒有上限就會一直長）。
+    $chromeDip = $contentDip - $RowScroll.ActualHeight
+    if ($chromeDip -le 0 -or $chromeDip -gt 200) { $chromeDip = $CHROME }
+    $maxRows = [Math]::Max(40.0, ($MAX_H / $scale) - $chromeDip)
+    if ([double]::IsNaN($RowScroll.MaxHeight) -or [Math]::Abs($maxRows - $RowScroll.MaxHeight) -gt 1) {
+        $RowScroll.MaxHeight = $maxRows
+    }
+
+    $target = [Math]::Max(96, [Math]::Min($MAX_H, $contentDip * $scale))
     if ([Math]::Abs($target - $win.Height) -le 1) { return }
-    Write-Diag ("scale={0} rows={1} ext={2} topDip={3} botDip={4} winAH={5} svAH={6} winH={7} -> {8}" -f `
-        $scale, $Rows.Children.Count, $ext, $topDip, $botDip, $win.ActualHeight, $RowScroll.ActualHeight, $win.Height, $target)
+    Write-Diag ("scale={0} rows={1} ext={2} contentDip={3} chromeDip={4} svAH={5} winH={6} -> {7}" -f `
+        $scale, $Rows.Children.Count, $ext, $contentDip, $chromeDip, $RowScroll.ActualHeight, $win.Height, $target)
     $win.Height = $target
     Clamp-ToWorkArea
 }
@@ -730,6 +804,36 @@ function Format-Uptime([double]$startedAtMs) {
     return '{0}d' -f [int]$span.TotalDays
 }
 
+# --- 底部的 5 小時用量 --------------------------------------------------------
+# 資料是 Claude Code 自己的快取，我們只是讀它，沒辦法叫它更新。實測可能落後兩小時以上，
+# 所以超過 15 分鐘就把「幾分鐘前」寫在標籤上——寧可顯得囉唆，也不要讓人以為是即時值。
+function Update-UsageFooter {
+    try {
+        $u = $Sync.Usage
+        if (-not $u) { $UsageBar.Visibility = 'Collapsed'; return }
+        $UsageBar.Visibility = 'Visible'
+
+        $pct = [int]$u.Pct
+        $reset = ''
+        try { $reset = ([DateTimeOffset]::Parse($u.ResetsAt)).LocalDateTime.ToString('HH:mm') } catch { }
+        $UsageValue.Text = if ($reset) { "{0}%　{1} 重置" -f $pct, $reset } else { "{0}%" -f $pct }
+
+        $ageMin = -1
+        if ($u.FetchedAt -gt 0) {
+            $ageMin = [int](([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $u.FetchedAt) / 60000)
+        }
+        $UsageLabel.Text = if ($ageMin -ge 15) { "5 小時用量（{0} 分前）" -f $ageMin } else { '5 小時用量' }
+
+        # 進度條：ActualWidth 是 DIP，跟 UsageFill.Width 同一個座標系，這裡不用換算 scale
+        $track = $UsageTrack.ActualWidth
+        if ($track -gt 0) {
+            $UsageFill.Width = [Math]::Max(0.0, [Math]::Min($track, $track * $pct / 100.0))
+        }
+        $hex = if ($pct -ge 85) { '#FFF7768E' } elseif ($pct -ge 60) { '#FFE0AF68' } else { '#FF7AA2F7' }
+        $UsageFill.Background = (New-Object Windows.Media.BrushConverter).ConvertFrom($hex)
+    } catch { Write-Diag ("USAGE 例外: {0}" -f $_.Exception.Message) }
+}
+
 # --- UI 更新迴圈（輕量，只讀共享表） ------------------------------------------
 $script:LastStamp = -1
 
@@ -737,6 +841,9 @@ $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromMilliseconds(700)
 $timer.Add_Tick({
     Apply-PendingResize
+    # 放在提前 return 之前：用量跟 session 清單是兩條獨立的資料，
+    # 清單沒變動的時候用量還是要更新（「幾分鐘前」每分鐘都在變）
+    Update-UsageFooter
     if ($Sync.Stamp -eq $LastStamp) { return }
     $script:LastStamp = $Sync.Stamp
 

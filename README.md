@@ -14,6 +14,9 @@
 │   web-client · web-client-b4 · 1h05    │
 │ ● 規劃資料庫遷移步驟             閒置 │
 │   notes-app · notes-app-e9 · 22m       │
+├────────────────────────────────────────┤
+│ 5 小時用量            9%  12:40 重置 │
+│ ███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
 └────────────────────────────────────────┘
 ```
 
@@ -21,6 +24,8 @@
 點任一列會把對應的編輯器視窗帶到前景，**並切換到該 session 的分頁**。
 
 平常視窗是半透明的，滑鼠移上去才會變清楚 —— 它永遠置頂，不該一直擋住底下的東西。
+
+底部顯示**目前 5 小時視窗的用量**（就是 `/usage` 的那個數字）與重置時間，60% 轉橙、85% 轉紅。
 
 ## 狀態
 
@@ -93,6 +98,7 @@ claude plugin install session-hud
 - **切分頁與「已完成→閒置」都靠對話標題**：分頁名稱與視窗標題裡的都是對話標題，所以還沒產生標題的新 session 只會被帶到視窗、不會切分頁，狀態也不會自動降級。同一視窗裡兩個 session 標題剛好一樣時也分不出來。
 - **切分頁會讓該 VS Code 視窗開啟完整無障礙樹**（跟裝了螢幕閱讀器一樣），那個視窗的記憶體與 CPU 會略微上升，直到 VS Code 重開。只有真的點了列才會發生。
 - **已開著的 session 一開始顯示「未知」**，要等它下次送出提示或結束回合才會有狀態。
+- **5 小時用量不是即時值**。它讀的是 Claude Code 自己寫在 `~/.claude.json` 的 `cachedUsageUtilization` 快取，更新時機由 Claude Code 決定（實測可能落後兩小時以上），HUD 沒有辦法叫它更新。所以超過 15 分鐘沒更新時，標籤會標上「幾分鐘前」。這個數字是**帳號層級**的，不是單一 session 的用量。
 - 介面為繁體中文。
 
 ## 開發筆記
@@ -100,6 +106,8 @@ claude plugin install session-hud
 這個 host（Windows PowerShell 5.1 + WPF + `AllowsTransparency`）有幾個踩過的坑，改動前建議先看程式碼裡的註解：
 
 - `Window.Width/Height` 是**實體像素**，但版面量測值（`ExtentHeight`／`ViewportHeight`／`ActualWidth`）是 **DIP**。在 125% 縮放下兩者差 1.25 倍，**兩軸都要換算**。
+- 承上，**版面裡不能有「填滿剩餘空間」的元素**（`Height="*"`、`VerticalAlignment="Stretch"`）。WPF 會拿 325 這個實體像素的數字當成 325 DIP 來排版，但看得到的只有 260 DIP，多出來的 65 DIP 會被那個元素吃掉，排在它下面的東西**整條被推到視窗外**（不是裁一半，是完全消失）。全部改成 `Auto` + `MaxHeight` 就沒事。
+- **視窗高度不要用「剩餘空間」反推**（`win.ActualHeight - viewport`）：viewport 本來就是 `win.Height` 決定的，拿結果推原因會震盪或崩塌。改成讀「靠上對齊、沒有指定 Height 的根 Border」的 `ActualHeight`，那才是內容真正需要的高度。
 - WPF 的**命中測試座標也對不上**（點第 5 列會觸發第 6 列），所以列的點擊改用實體螢幕座標自己算索引，沒有綁在列元素上。
 - 跨 runspace 傳回的陣列會被包成「單一元素、內容是整個陣列」：`.Count` 回 1、`foreach` 只跑一圈，但走管線卻會展開成 N 筆。用 `Expand-Sessions` 攤平。
 - `SizeToContent="Height"` 在 `AllowsTransparency` + `NoResize` 下首次排版後就不再跟著內容變高。
