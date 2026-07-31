@@ -550,6 +550,24 @@ function Set-SessionIdleIfDone([string]$sessionId) {
     } catch { }
 }
 
+# --- 完成音效 ----------------------------------------------------------------
+# 用 SystemSounds 而不是自己指定 .wav：它跟著 Windows 的音效配置走，
+# 使用者把配置調成「無音效」時自然就安靜，不必在這裡另外做開關。
+# 不想要的話把下面這行改成 $false。
+$SOUND_ON_DONE = $true
+
+$script:PrevStatus   = @{}      # sessionId -> 上一輪的原始狀態
+$script:StatusSeeded = $false   # 第一輪只記錄不發聲，否則 HUD 一開就把既有的 done 全部叫一遍
+
+function Invoke-DoneSound {
+    if (-not $SOUND_ON_DONE) { return }
+    # Play() 是非同步的，不會卡住 UI 執行緒
+    try {
+        [System.Media.SystemSounds]::Asterisk.Play()
+        Write-Diag ("SOUND {0}" -f [DateTime]::Now.ToString('HH:mm:ss'))
+    } catch { }
+}
+
 # 使用者是不是正看著這個 session？
 # VS Code／Cursor 的視窗標題是「<作用中分頁名> - <資料夾> - <編輯器>」，而 Claude session
 # 分頁的名稱就是對話標題，所以前景視窗標題以「<標題> - <專案>」開頭就代表正在看它。
@@ -727,8 +745,15 @@ $timer.Add_Tick({
     $fgTitle = ''
     try { $fgTitle = [HudWin]::ForegroundTitle() } catch { }
 
+    $fresh = @{}
+    $playDone = $false
+
     $projected = foreach ($s in $sessions) {
         $st = Get-SessionStatus $s.SessId
+        # 音效看的是「還沒降級的原始狀態」：一個回合跑完了就是跑完了，
+        # 不該因為使用者剛好正看著那個視窗就變成沒完成。
+        if ($StatusSeeded -and $st -eq 'done' -and $PrevStatus[$s.SessId] -ne 'done') { $playDone = $true }
+        $fresh[$s.SessId] = $st
         # 回合跑完是「已完成」，等使用者真的切過去看了才降級成「閒置」
         if ($st -eq 'done' -and (Test-SessionFocused $fgTitle $s.Title $s.Proj)) {
             Set-SessionIdleIfDone $s.SessId
@@ -742,6 +767,12 @@ $timer.Add_Tick({
             Status  = $st
         }
     }
+    # 整個換掉而不是逐筆更新：關掉的 session 就自動從表裡消失，不用另外清理
+    $script:PrevStatus   = $fresh
+    $script:StatusSeeded = $true
+    # 同一輪有好幾個 session 一起完成時只響一次，不要疊在一起
+    if ($playDone) { Invoke-DoneSound }
+
     $ordered = @($projected | Sort-Object -Property Proj, Started)
     $metaList = New-Object System.Collections.Generic.List[object]
 

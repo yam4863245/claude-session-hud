@@ -47,6 +47,11 @@ claude plugin update session-hud
 串起兩邊的 key 是 `claude agents --json` 的 `sessionId`，也就是 hook payload 的 `session_id`。
 沒有狀態檔 = `unknown`，不是錯誤。
 
+**完成音效也在 HUD 這邊**（`Invoke-DoneSound`），不在 hook 裡 —— HUD 本來就有狀態機，
+抓得到「上一輪不是 done、這一輪是 done」那一刻。兩個必要條件：**第一輪只記錄不發聲**
+（否則 HUD 一開就把既有的 done 全部叫一遍），以及**比對的是降級前的原始狀態**
+（回合跑完就是跑完，不該因為使用者剛好正看著就變成沒完成）。
+
 **`idle` 不是 hook 寫的**（沒有「使用者看了」這種事件）。HUD 每輪比對前景視窗標題，
 發現使用者正看著某個 `done` 的 session 就自己把檔案降級成 `idle` —— 這是唯一由 HUD 寫入狀態檔的地方。
 判斷依據是 VS Code 標題的格式 `<作用中分頁名> - <資料夾> - <編輯器>`，而分頁名就是對話標題。

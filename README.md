@@ -34,6 +34,10 @@
 
 「已完成」會在你把那個 session 切到前景時自動變成「閒置」，所以掃一眼 HUD 就知道哪些回合還沒收。
 
+**回合完成時會播一次 Windows 通知音**（系統的「星號」音效）。它跟著 Windows 的音效配置走，所以在
+「設定 → 系統 → 音效 → 更多音效設定」把配置改成「無音效」就會安靜；只想關 HUD 這一個的話，
+把 `scripts/session-hud.ps1` 裡的 `$SOUND_ON_DONE` 改成 `$false`。
+
 ## 需求
 
 - **Windows**（用 WPF + Win32 API，不支援 macOS / Linux）
