@@ -26,7 +26,7 @@
 
 | 狀態 | 什麼時候 |
 |---|---|
-| **執行中** | 你送出提示後，Claude 正在跑 |
+| **執行中** | 你送出提示後，Claude 正在跑（狀態文字右邊有持續旋轉的圈圈） |
 | **等你** | 卡在授權或提問上 |
 | **已完成** | 回合跑完了，但你還沒回頭看 |
 | **閒置** | 跑完而且你已經看過了 |
@@ -102,6 +102,8 @@ claude plugin install session-hud
 - `.vbs` 必須是 **ASCII 且無 BOM**（cscript 不吃 UTF-8 BOM）；`.ps1` 反之必須**有 BOM**，否則 PS 5.1 會把中文讀成亂碼。
 - **切編輯器分頁走 UI Automation**：Win32 只看得到視窗。VS Code 的分頁是 `TabItem`，名稱等於對話標題，畫面分成多個編輯器群組時會多一段 `, 編輯器群組 N` 後綴。切換用 `SelectionItemPattern.Select()`（`InvokePattern` 不存在）；讀 `IsSelected` 驗證會**慢一拍**拿到上一次的值，別因此以為沒切成功。
 - **透明度一律走 `BeginAnimation`**：混用直接指派 `Opacity` 會被動畫的保留值蓋掉，滑鼠移開後就變不回半透明。
+- **列每 3 秒整批重建，所以動畫要對齊全域相位**：轉圈圈若都從 0 度開始，每次重建就會跳一下。用負的 `BeginTime`（`-(現在時刻 mod 週期)`）讓時間軸「從過去開始」，角度就只跟絕對時間有關，換掉元件也看不出來。
+- **分層視窗的動畫要壓幀率**：每一幀都得把整面重新送進 `UpdateLayeredWindow`，轉圈圈用 `Timeline.SetDesiredFrameRate` 壓到 24fps，省下的 CPU 比看得出來的流暢度多。
 
 ## 授權
 

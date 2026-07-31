@@ -78,6 +78,12 @@ claude plugin update session-hud
 - **透明度只走 `BeginAnimation`**：`Window.Opacity` 一旦被動畫設過，之後直接指派就無效（動畫值優先），
   混用會讓滑鼠移開後變不回半透明。hover 用的 `MouseEnter/MouseLeave` 綁在 `RootBorder` 上，
   不要綁 `$win` —— 視窗背景是 `Transparent`，命中測試不一定吃得到。
+- **列每 3 秒整批重建，動畫必須對齊全域相位**：新元件的動畫如果從 0 開始，使用者會看到週期性的跳動。
+  用負的 `BeginTime`（`-(現在時刻 mod 週期)`）讓角度只跟絕對時間有關，重建就看不出來。
+  分層視窗每幀都要整面重送，動畫記得用 `Timeline.SetDesiredFrameRate` 壓幀率。
+- **驗證小圖示的動畫不要用肉眼或整窗像素差**：`PrintWindow` 拍得到 `RenderTransform`（拍不到 `Window.Opacity`，
+  那個在合成層）。量旋轉相位要**只框圖示本身** —— 綠色的「執行中」文字就在圈圈左邊，
+  多框幾欄進來就會把推算出的圓心整個推歪，量到的角度會被釘死不動，看起來像沒在轉。
 
 ## 驗證 HUD 的方式
 

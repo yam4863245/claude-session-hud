@@ -562,6 +562,45 @@ function Test-SessionFocused([string]$fgTitle, [string]$convTitle, [string]$proj
 
 # --- 列的建構 ----------------------------------------------------------------
 
+$SPIN_MS = 900   # 轉一圈的毫秒數
+
+# 「執行中」右邊那顆持續旋轉的圈圈。
+# 用 Ellipse + StrokeDashArray 做出缺口，而不是 Path/ArcSegment——同樣的 C 形，少一半程式碼。
+function New-Spinner($colorHex) {
+    $e = New-Object Windows.Shapes.Ellipse
+    $e.Width = 10; $e.Height = 10
+    $e.Stroke = (New-Object Windows.Media.BrushConverter).ConvertFrom($colorHex)
+    $e.StrokeThickness = 1.6
+    # StrokeDashArray 的單位是 StrokeThickness 的倍數，不是像素：圓周 ≈ π×10 ÷ 1.6 ≈ 19.6。
+    # 留 7 當缺口 ≈ 11.2px，再扣掉圓頭端點吃掉的 1.6px，實際缺口約 110 度。
+    # 這個尺寸下缺口太小會看不出在轉，看起來只像一個靜止的圓圈。
+    $dash = New-Object Windows.Media.DoubleCollection
+    $dash.Add(12.6); $dash.Add(7.0)
+    $e.StrokeDashArray = $dash
+    $e.StrokeDashCap = 'Round'
+    $e.VerticalAlignment = 'Center'
+    $e.Margin = New-Object Windows.Thickness 6, 0, 1, 0
+
+    $rot = New-Object Windows.Media.RotateTransform
+    $e.RenderTransformOrigin = New-Object Windows.Point 0.5, 0.5
+    $e.RenderTransform = $rot
+
+    $anim = New-Object Windows.Media.Animation.DoubleAnimation
+    $anim.From = 0; $anim.To = 360
+    $anim.Duration = New-Object Windows.Duration ([TimeSpan]::FromMilliseconds($SPIN_MS))
+    $anim.RepeatBehavior = [Windows.Media.Animation.RepeatBehavior]::Forever
+    # 列每 3 秒會整批重建，動畫若都從 0 度開始，圈圈就會週期性地跳回原點。
+    # 負的 BeginTime 代表「這條時間軸其實在過去就開始了」，用時鐘算出相位補回去，
+    # 重建出來的新圈圈就會接在舊的角度上，看不出來換過元件。
+    $phase = [DateTime]::UtcNow.TimeOfDay.TotalMilliseconds % $SPIN_MS
+    $anim.BeginTime = [TimeSpan]::FromMilliseconds(-$phase)
+    # 這是 AllowsTransparency 的分層視窗，每一幀都得把整面重新送進 UpdateLayeredWindow，
+    # 所以動畫幀率壓到 24——省下的 CPU 比看得出來的流暢度多。
+    [Windows.Media.Animation.Timeline]::SetDesiredFrameRate($anim, 24)
+    $rot.BeginAnimation([Windows.Media.RotateTransform]::AngleProperty, $anim)
+    return $e
+}
+
 function New-SessionRow($projectName, $sessionName, $title, $uptime, $status) {
     $style    = $STATUS_STYLE[$status]
     if (-not $style) { $style = $STATUS_STYLE['unknown'] }
@@ -616,8 +655,15 @@ function New-SessionRow($projectName, $sessionName, $title, $uptime, $status) {
     $t3.Margin = New-Object Windows.Thickness 8, 0, 0, 0
     [Windows.Controls.DockPanel]::SetDock($t3, 'Right')
 
-    # 加入順序就是配置順序：先左邊圓點、再右邊狀態，最後才是會填滿剩餘空間的 stack
-    [void]$dock.Children.Add($dot); [void]$dock.Children.Add($t3); [void]$dock.Children.Add($stack)
+    # 加入順序就是配置順序：先左邊圓點，再由右往左排（先加的靠更右邊），
+    # 最後才是會填滿剩餘空間的 stack。所以圈圈要加在狀態文字「之前」才會落在它右邊。
+    [void]$dock.Children.Add($dot)
+    if ($status -eq 'working') {
+        $spin = New-Spinner $colorHex
+        [Windows.Controls.DockPanel]::SetDock($spin, 'Right')
+        [void]$dock.Children.Add($spin)
+    }
+    [void]$dock.Children.Add($t3); [void]$dock.Children.Add($stack)
     $border.Child = $dock
 
     $hoverBrush = (New-Object Windows.Media.BrushConverter).ConvertFrom('#18FFFFFF')
