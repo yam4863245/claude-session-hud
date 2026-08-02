@@ -1126,7 +1126,9 @@ $timer.Add_Tick({
                 } else {
                     $n = 1 + [int]$script:TabMiss[$s.SessId]
                     $script:TabMiss[$s.SessId] = $n
-                    Write-Diag ("TABMISS miss={0} {1} 「{2}」" -f $n, $s.SessId, $s.Title)
+                    # 過了門檻就不用再記——那一列已經藏起來了，狀態不會再變，
+                    # 每 30 秒補一筆只會把 log 灌成幾千行一模一樣的東西
+                    if ($n -le 2) { Write-Diag ("TABMISS miss={0} {1} 「{2}」" -f $n, $s.SessId, $s.Title) }
                 }
             }
             # 連兩次掃描都找不到才拿掉：分頁改名、視窗剛開起來的空窗期都可能漏掉一次。
