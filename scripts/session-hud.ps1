@@ -128,6 +128,29 @@ public class HudWin {
 # 只在「使用者點了某一列」時才呼叫——掃一次 UIA 樹要 ~100ms，不能放進輪詢迴圈。
 # 副作用：對 Electron 視窗發 UIA 查詢會讓 Chromium 開啟完整無障礙樹（跟螢幕閱讀器一樣），
 # 那個視窗的記憶體與 CPU 會略微上升，直到 VS Code 重開為止。
+# 分頁名不一定等於對話標題：超過約 24 個字時外掛會截成「前綴 + …」（U+2026），
+# 而視窗標題用的也是截斷後那個字串。所以任何拿分頁名比對標題的地方都要走這裡，
+# 直接 -eq 會讓所有長標題的 session 永遠比不中（切分頁失效、已完成也降不了級）。
+# 前 24 個字剛好相同的兩個 session 會互相誤判，但那要標題幾乎一樣才會發生，先不處理。
+function Test-TabLabelMatch([string]$label, [string]$convTitle) {
+    if ([string]::IsNullOrWhiteSpace($label) -or [string]::IsNullOrWhiteSpace($convTitle)) { return $false }
+    if ($label -eq $convTitle) { return $true }
+    if (-not $label.EndsWith([string][char]0x2026, 'Ordinal')) { return $false }
+    # 截斷點可能落在空白上，比對前先去掉尾端空白
+    $prefix = $label.Substring(0, $label.Length - 1).TrimEnd()
+    if ($prefix.Length -eq 0) { return $false }
+    return $convTitle.StartsWith($prefix, 'Ordinal')
+}
+
+# 視窗標題裡「- 」後面那一段是不是這個專案的資料夾？
+# 工作區會多一段「 (工作區)」後綴，所以用前綴比對；但要求後面接的是空白或結尾，
+# 否則 "api" 會誤中 "api-worker"。
+function Test-ProjSegment([string]$segment, [string]$proj) {
+    if (-not $segment.StartsWith($proj, 'Ordinal')) { return $false }
+    if ($segment.Length -eq $proj.Length) { return $true }
+    return $segment[$proj.Length] -eq ' '
+}
+
 function Find-EditorTab($hwnd, [string]$convTitle) {
     if (-not $UiaOk -or [string]::IsNullOrWhiteSpace($convTitle)) { return $null }
     try {
@@ -140,8 +163,11 @@ function Find-EditorTab($hwnd, [string]$convTitle) {
             $n = $t.Current.Name
             if (-not $n) { continue }
             # 畫面上分成多個編輯器群組時，分頁名稱會多一段「, 編輯器群組 N」後綴，
-            # 只有單一群組時則沒有——兩種都要接。
-            if ($n -eq $convTitle -or $n.StartsWith("$convTitle, ", 'Ordinal')) { return $t }
+            # 只有單一群組時則沒有——兩種都要接。後綴要在判斷截斷之前切掉，
+            # 不然「…, 編輯器群組 2」看起來就不是以 … 結尾。
+            if (Test-TabLabelMatch $n $convTitle) { return $t }
+            $k = $n.LastIndexOf(', ', [StringComparison]::Ordinal)
+            if ($k -gt 0 -and (Test-TabLabelMatch $n.Substring(0, $k) $convTitle)) { return $t }
         }
     } catch { }
     return $null
@@ -174,7 +200,7 @@ function Find-TargetForSession([string]$baseName, [string]$convTitle) {
         if ($score -eq 0) { continue }
         # 標題開頭就是這個對話標題 = 這個視窗此刻正開著該 session，直接命中，
         # 連 UIA 都不用掃。這也是同專案開在多個視窗時最可靠的判別依據。
-        if ($convTitle -and $t.StartsWith("$convTitle - ", 'Ordinal')) { $score += 10 }
+        if (Test-SessionFocused $t $convTitle $baseName) { $score += 10 }
         $cands.Add([PSCustomObject]@{ Win = $w; Score = $score })
     }
     if ($cands.Count -eq 0) { return $null }
@@ -728,12 +754,21 @@ function Invoke-StatusSound([string]$kind) {
 
 # 使用者是不是正看著這個 session？
 # VS Code／Cursor 的視窗標題是「<作用中分頁名> - <資料夾> - <編輯器>」，而 Claude session
-# 分頁的名稱就是對話標題，所以前景視窗標題以「<標題> - <專案>」開頭就代表正在看它。
+# 分頁的名稱就是對話標題，所以只要「- <專案>」左邊那一段對得上標題就代表正在看它。
 # 沒有對話標題的 session（剛開、還沒產生標題）無從判斷，一律當成沒被聚焦。
 function Test-SessionFocused([string]$fgTitle, [string]$convTitle, [string]$proj) {
     if ([string]::IsNullOrWhiteSpace($fgTitle)) { return $false }
     if ([string]::IsNullOrWhiteSpace($convTitle) -or [string]::IsNullOrWhiteSpace($proj)) { return $false }
-    return $fgTitle.StartsWith("$convTitle - $proj", 'Ordinal')
+    # 對話標題本身可能含「 - 」，所以不能只找第一個分隔點：每個分隔點都試一次，
+    # 右邊接得上專案資料夾名的那個才是真正的切點。
+    $sep = ' - '
+    $i = $fgTitle.IndexOf($sep, [StringComparison]::Ordinal)
+    while ($i -ge 0) {
+        if ((Test-ProjSegment $fgTitle.Substring($i + $sep.Length) $proj) -and
+            (Test-TabLabelMatch $fgTitle.Substring(0, $i) $convTitle)) { return $true }
+        $i = $fgTitle.IndexOf($sep, $i + 1, [StringComparison]::Ordinal)
+    }
+    return $false
 }
 
 # --- 列的建構 ----------------------------------------------------------------
