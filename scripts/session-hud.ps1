@@ -224,6 +224,11 @@ $script:Sync = [hashtable]::Synchronized(@{
     Error    = $null
     Stamp    = 0
     Usage    = $null
+    # 分頁核對（見下面的 verifier runspace）：UI 那邊發需求、verifier 掃完把結果放回來
+    TabLabels   = $null    # 最近一次掃到的所有編輯器分頁名稱
+    TabScanGen  = 0        # 掃描世代，UI 靠它分辨「這是新的一次掃描」而不是同一份結果重算
+    WantTabScan = $false   # 這一輪有沒有列需要核對；沒有就完全不掃
+    TabDiag     = $null    # 最近一次掃描的結果摘要，由 UI 抄進 layout-diag.log
 })
 
 $poller = [powershell]::Create()
@@ -240,6 +245,22 @@ $poller.Runspace = $rs
     # 目錄名的正規化規則：cwd 裡所有非英數字元一律換成 "-"。
     $titleCache = @{}
     $statusDir = Join-Path $env:USERPROFILE '.claude\session-status'
+
+    # 只有「在編輯器裡開的 session」才有分頁可以核對；用終端機直接跑的 claude 永遠比不中分頁，
+    # 拿分頁存不存在來判它死刑會把它整個從清單上抹掉。entrypoint 記在 Claude Code 自己的
+    # 行程註冊檔 ~/.claude/sessions/<pid>.json（claude agents --json 沒有這個欄位）。
+    # 一個 pid 的 entrypoint 不會變，查到就快取。
+    $entryCache = @{}
+    function Get-Entrypoint([int]$procId) {
+        if ($entryCache.ContainsKey($procId)) { return $entryCache[$procId] }
+        $v = ''
+        try {
+            $f = Join-Path $env:USERPROFILE ".claude\sessions\$procId.json"
+            if (Test-Path $f) { $v = [string]((Get-Content $f -Raw -ErrorAction Stop | ConvertFrom-Json).entrypoint) }
+        } catch { }
+        $entryCache[$procId] = $v
+        return $v
+    }
 
     function Resolve-TranscriptPath([string]$cwd, [string]$sessionId) {
         $safe = ($cwd -replace '[^A-Za-z0-9]', '-')
@@ -342,9 +363,12 @@ $poller.Runspace = $rs
                 $hasStatus = Test-Path (Join-Path $statusDir "$($s.sessionId).json")
                 if (-not $tp -and -not $hasStatus) { continue }
 
+                # 轉錄檔多久沒動了——剛動過的 session 一定還活著，不必花錢去掃分頁
+                $quiet = $true
                 if ($tp) {
                     $fi = New-Object System.IO.FileInfo $tp
                     $stamp = "$($fi.Length):$($fi.LastWriteTimeUtc.Ticks)"
+                    $quiet = $fi.LastWriteTimeUtc -lt [DateTime]::UtcNow.AddMinutes(-5)
                     $c = $titleCache[$s.sessionId]
                     if ($c -and $c.Stamp -eq $stamp) {
                         $title = $c.Title
@@ -354,11 +378,13 @@ $poller.Runspace = $rs
                     }
                 }
                 $out.Add([PSCustomObject]@{
-                    Proj    = (Split-Path $s.cwd -Leaf)
-                    SName   = $s.name
-                    Started = [double]$s.startedAt
-                    SessId  = [string]$s.sessionId
-                    Title   = $title
+                    Proj     = (Split-Path $s.cwd -Leaf)
+                    SName    = $s.name
+                    Started  = [double]$s.startedAt
+                    SessId   = [string]$s.sessionId
+                    Title    = $title
+                    IsVsCode = ((Get-Entrypoint ([int]$s.pid)) -eq 'claude-vscode')
+                    Quiet    = $quiet
                 })
             }
             $Sync.Sessions = $out.ToArray()
@@ -371,6 +397,60 @@ $poller.Runspace = $rs
     }
 })
 [void]$poller.BeginInvoke()
+
+# --- 分頁核對：行程還在不等於你還看得到它 --------------------------------------
+# 在 VS Code 裡關掉一個 Claude 分頁，那個 claude.exe「不會」結束，也不會觸發 SessionEnd
+# （實測：SessionEnd 只有整個編輯器視窗關掉時才會一次噴一批）。行程還在 →
+# ~/.claude/sessions/<pid>.json 還在 → claude agents --json 照列 → 轉錄檔也還在，
+# 於是「沒轉錄檔且沒狀態檔」那道佔位過濾完全擋不住它，那一列就永遠賴在畫面上。
+#
+# 找不到比較便宜的判斷依據：行程註冊檔沒有心跳，殘留行程的父子關係、CPU、handle 數
+# 跟活著的一模一樣。唯一的真相來源就是「編輯器裡到底還有沒有這個分頁」，只能問 UIA。
+#
+# 掃一次（三個視窗、65 個分頁）約 650ms，而且會讓 Electron 打開完整無障礙樹
+# （記憶體與 CPU 略升，直到編輯器重開），所以：獨立 runspace、30 秒一次、
+# 而且只有 UI 那邊真的有「看起來已經停下來」的列要核對時才掃。
+# 用 STA 是因為 UIA 是 COM，跑在 poller 那個 MTA runspace 裡不保險。
+$verifier = [powershell]::Create()
+$vrs = [runspacefactory]::CreateRunspace()
+$vrs.ApartmentState = 'STA'
+$vrs.ThreadOptions  = 'ReuseThread'
+$vrs.Open()
+$vrs.SessionStateProxy.SetVariable('Sync', $Sync)
+$verifier.Runspace = $vrs
+[void]$verifier.AddScript({
+    # 載不到 UIA 就整個不做核對：寧可留著多餘的列，也不要無法查證就開始藏東西
+    try { Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes } catch { return }
+    $cond = New-Object System.Windows.Automation.PropertyCondition(
+                [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                [System.Windows.Automation.ControlType]::TabItem)
+    while ($true) {
+        Start-Sleep -Seconds 30
+        try {
+            if (-not $Sync.WantTabScan) { continue }
+            $labels = New-Object System.Collections.Generic.List[string]
+            $wins = 0
+            # HudWin 是主 runspace 用 Add-Type 定義的，但型別載在同一個 AppDomain，這裡拿得到
+            foreach ($w in [HudWin]::Visible()) {
+                if ($w.Title -notlike '*Visual Studio Code*' -and $w.Title -notlike '*Cursor*') { continue }
+                $wins++
+                $root = [System.Windows.Automation.AutomationElement]::FromHandle($w.Handle)
+                if (-not $root) { continue }
+                foreach ($t in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)) {
+                    $n = $t.Current.Name
+                    if ($n) { $labels.Add([string]$n) }
+                }
+            }
+            # 一個編輯器視窗都沒掃到（編輯器關了、UIA 壞了、視窗還沒起來）就不要發布結果。
+            # 空清單會讓 UI 把每一列都判成「分頁不見了」，一口氣全部藏起來。
+            if ($wins -eq 0 -or $labels.Count -eq 0) { continue }
+            $Sync.TabLabels  = $labels.ToArray()
+            $Sync.TabDiag    = "wins=$wins labels=$($labels.Count)"
+            $Sync.TabScanGen = $Sync.TabScanGen + 1
+        } catch { $Sync.TabDiag = "例外: $($_.Exception.Message)" }
+    }
+})
+[void]$verifier.BeginInvoke()
 
 # --- 視窗外殼 ----------------------------------------------------------------
 [xml]$xaml = @'
@@ -745,6 +825,10 @@ $SOUND_ON_ASKING = $true   # Claude 丟問題出來等你決定
 $script:PrevStatus   = @{}      # sessionId -> 上一輪的原始狀態
 $script:StatusSeeded = $false   # 第一輪只記錄不發聲，否則 HUD 一開就把既有的 done 全部叫一遍
 
+$script:TabMiss = @{}   # sessionId -> 連續幾次掃描都找不到對應分頁
+$script:TabGen  = -1    # 已經結算過的掃描世代，避免同一份掃描結果被重複計數
+$script:LastTabDiag = ''
+
 # 兩件事用不同的系統音，不用看畫面就分得出是「做完了」還是「在問你」。
 # Exclamation 比 Asterisk 更尖，剛好對應「這件事會卡住不動」。
 function Invoke-StatusSound([string]$kind) {
@@ -776,6 +860,21 @@ function Test-SessionFocused([string]$fgTitle, [string]$convTitle, [string]$proj
         if ((Test-ProjSegment $fgTitle.Substring($i + $sep.Length) $proj) -and
             (Test-TabLabelMatch $fgTitle.Substring(0, $i) $convTitle)) { return $true }
         $i = $fgTitle.IndexOf($sep, $i + 1, [StringComparison]::Ordinal)
+    }
+    return $false
+}
+
+# 這個對話標題在編輯器裡還找得到分頁嗎？（分頁名清單由 verifier runspace 掃來）
+# 跟 Find-EditorTab 用同一套規則：分頁名可能被截斷（Test-TabLabelMatch 負責），
+# 畫面分成多個編輯器群組時還會多一段「, 編輯器群組 N」後綴，
+# 後綴要先切掉再判斷有沒有被截斷，否則「…, 編輯器群組 2」看起來就不是以 … 結尾。
+function Test-TitleHasTab($labels, [string]$convTitle) {
+    if (-not $labels -or [string]::IsNullOrWhiteSpace($convTitle)) { return $false }
+    foreach ($n in $labels) {
+        if ([string]::IsNullOrWhiteSpace($n)) { continue }
+        if (Test-TabLabelMatch $n $convTitle) { return $true }
+        $k = $n.LastIndexOf(', ', [StringComparison]::Ordinal)
+        if ($k -gt 0 -and (Test-TabLabelMatch $n.Substring(0, $k) $convTitle)) { return $true }
     }
     return $false
 }
@@ -986,6 +1085,21 @@ $timer.Add_Tick({
     $playDone = $false
     $playAsk  = $false
 
+    # 分頁核對：這一輪有沒有「新的一次掃描結果」要結算？沒有就只沿用既有的計數，
+    # 否則 700ms 一次的 tick 會拿同一份掃描結果反覆累加，兩三秒就把列砍光。
+    $tabLabels = $Sync.TabLabels
+    $newGen    = [int]$Sync.TabScanGen
+    $applyScan = ($newGen -ne $TabGen -and $tabLabels)
+    if ($applyScan) { $script:TabGen = $newGen }
+    $wantScan  = $false
+    # 掃描跑在別的 runspace，Write-Diag 只有這裡叫得到——結果變了就抄一筆進 log
+    # 條件要含 $applyScan：兩次掃描結果字串一模一樣時只看字串會漏記，
+    # log 上就會變成「一次掃描產生了兩次 miss」，看起來像計數重複累加。
+    if ($applyScan -or ($Sync.TabDiag -and $Sync.TabDiag -ne $script:LastTabDiag)) {
+        $script:LastTabDiag = $Sync.TabDiag
+        Write-Diag ("TABSCAN gen={0} {1}" -f $newGen, $Sync.TabDiag)
+    }
+
     $projected = foreach ($s in $sessions) {
         $st = Get-SessionStatus $s.SessId
         # 音效看的是「還沒降級的原始狀態」：一個回合跑完了就是跑完了，
@@ -995,6 +1109,31 @@ $timer.Add_Tick({
             if ($st -eq 'asking') { $playAsk  = $true }
         }
         $fresh[$s.SessId] = $st
+
+        # 分頁被關掉的 session 行程還留著，得靠「編輯器裡還有沒有這個分頁」才判得出來。
+        # 只核對「來自 VS Code、有標題、已經一段時間沒動、而且狀態是靜止的」那幾列：
+        # 終端機跑的 session 本來就沒有分頁；正在跑或在等你的一定還活著；
+        # 剛動過的也不必查——這道門檻同時決定了 verifier 要不要花那 650ms 去掃。
+        $checkable = $s.IsVsCode -and $s.Quiet -and $s.Title -and
+                     ($st -eq 'unknown' -or $st -eq 'idle' -or $st -eq 'done')
+        if (-not $checkable) {
+            $script:TabMiss.Remove($s.SessId)
+        } else {
+            $wantScan = $true
+            if ($applyScan) {
+                if (Test-TitleHasTab $tabLabels $s.Title) {
+                    $script:TabMiss.Remove($s.SessId)
+                } else {
+                    $n = 1 + [int]$script:TabMiss[$s.SessId]
+                    $script:TabMiss[$s.SessId] = $n
+                    Write-Diag ("TABMISS miss={0} {1} 「{2}」" -f $n, $s.SessId, $s.Title)
+                }
+            }
+            # 連兩次掃描都找不到才拿掉：分頁改名、視窗剛開起來的空窗期都可能漏掉一次。
+            # 使用者一把分頁開回來，下一次掃描就會把計數清掉，這一列自己會冒回來。
+            if ([int]$script:TabMiss[$s.SessId] -ge 2) { continue }
+        }
+
         # 回合跑完是「已完成」，等使用者真的切過去看了才降級成「閒置」
         if ($st -eq 'done' -and (Test-SessionFocused $fgTitle $s.Title $s.Proj)) {
             Set-SessionIdleIfDone $s.SessId
@@ -1011,6 +1150,8 @@ $timer.Add_Tick({
     # 整個換掉而不是逐筆更新：關掉的 session 就自動從表裡消失，不用另外清理
     $script:PrevStatus   = $fresh
     $script:StatusSeeded = $true
+    # 全部都在動的時候就完全不掃分頁，省下那筆固定開銷
+    $Sync.WantTabScan = $wantScan
     # 同一輪有好幾個 session 一起變動時各只響一次，不要疊在一起。
     # 兩種同時發生就只響「在問你」那個——它會卡住不動，比較急。
     if ($playAsk) { Invoke-StatusSound 'asking' }
@@ -1042,6 +1183,7 @@ $win.Add_Closed({
     $timer.Stop()
     try { @{ Left = $win.Left; Top = $win.Top } | ConvertTo-Json | Set-Content -Path $PosFile -Encoding UTF8 } catch { }
     try { $poller.Stop(); $poller.Dispose(); $rs.Close(); $rs.Dispose() } catch { }
+    try { $verifier.Stop(); $verifier.Dispose(); $vrs.Close(); $vrs.Dispose() } catch { }
 })
 
 [void]$win.ShowDialog()

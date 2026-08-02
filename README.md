@@ -87,6 +87,7 @@ claude plugin install session-hud
 |---|---|
 | `scripts/session-hud.ps1` | HUD 本體。背景 runspace 每 3 秒跑 `claude agents --json`，UI 執行緒只負責繪製 |
 | ↳ 佔位行程過濾 | VS Code 外掛會預先開好備用的 `claude` 行程，它們會出現在 `claude agents --json` 裡但沒有任何對話 —— 沒有轉錄檔也沒有狀態檔的一律不列出 |
+| ↳ 分頁核對 | 關掉編輯器分頁並不會結束 `claude` 行程，那一列會賴著不走。獨立的 STA runspace 每 30 秒用 UIA 掃一次所有編輯器視窗的分頁名稱，連續兩次找不到對應分頁的列才移除；只查「來自編輯器、有標題、且已經靜止」的列，全部都在跑的時候完全不掃 |
 | `scripts/status-hook.cjs` | 由 hooks 呼叫，把狀態寫到 `~/.claude/session-status/<sessionId>.json` |
 | `hooks/hooks.json` | 全域事件 → 狀態：`UserPromptSubmit`=執行中、`PreToolUse[AskUserQuestion]`=需要我做決定、`PostToolUse[AskUserQuestion]`=執行中、`Notification`=等你、`Stop`=已完成、`SessionEnd`=刪除 |
 | `scripts/start-hud.vbs` | 無主控台啟動器 |
@@ -107,7 +108,8 @@ claude plugin install session-hud
 - **僅 Windows**。
 - **點擊聚焦靠視窗標題比對**：找標題含 `- <專案資料夾名> -` 或 `- <專案資料夾名> (` 的視窗。VS Code、Cursor 這類會把資料夾名寫進標題的編輯器可用；純終端機的 session 通常找不到對應視窗。
 - **切分頁與「已完成→閒置」都靠對話標題**：分頁名稱與視窗標題裡的都是對話標題，所以還沒產生標題的新 session 只會被帶到視窗、不會切分頁，狀態也不會自動降級。同一視窗裡兩個 session 標題剛好一樣時也分不出來。
-- **切分頁會讓該 VS Code 視窗開啟完整無障礙樹**（跟裝了螢幕閱讀器一樣），那個視窗的記憶體與 CPU 會略微上升，直到 VS Code 重開。只有真的點了列才會發生。
+- **UIA 會讓 VS Code 視窗開啟完整無障礙樹**（跟裝了螢幕閱讀器一樣），那些視窗的記憶體與 CPU 會略微上升，直到 VS Code 重開。點擊切分頁會觸發，每 30 秒一次的分頁核對也會 —— 後者在有「靜止」的列時就會持續進行。
+- **關掉編輯器分頁不會馬上從清單消失**：那個 `claude` 行程其實還活著，要等分頁核對連續兩次都找不到分頁（最多約 60 秒）才會移除。反過來，把分頁開回來也會在一次核對後自己出現。
 - **已開著的 session 一開始顯示「未知」**，要等它下次送出提示或結束回合才會有狀態。
 - **5 小時用量不是即時值**。它讀的是 Claude Code 自己寫在 `~/.claude.json` 的 `cachedUsageUtilization` 快取，更新時機由 Claude Code 決定（實測可能落後兩小時以上），HUD 沒有辦法叫它更新。所以超過 15 分鐘沒更新時，標籤會標上「幾分鐘前」。這個數字是**帳號層級**的，不是單一 session 的用量。
 - 介面為繁體中文。
