@@ -123,6 +123,7 @@ claude plugin install session-hud
 - 跨 runspace 傳回的陣列會被包成「單一元素、內容是整個陣列」：`.Count` 回 1、`foreach` 只跑一圈，但走管線卻會展開成 N 筆。用 `Expand-Sessions` 攤平。
 - `SizeToContent="Height"` 在 `AllowsTransparency` + `NoResize` 下首次排版後就不再跟著內容變高。
 - PowerShell 的 WPF 事件處理器會**靜默吞掉例外**，所以處理器內都自己包 try/catch 並寫 log。
+- **標題列上的按鈕要綁 `PreviewMouseLeftButtonDown` 而不是 `MouseLeftButtonUp`**：標題列的 Down 會呼叫 `DragMove()`，它的模態移動迴圈會吃掉後續的 MouseUp，綁在 Up 上的處理器永遠不會被呼叫（按下去毫無反應、也沒有例外）。隧道階段攔下來並設 `Handled` 才行。
 - `.vbs` 必須是 **ASCII 且無 BOM**（cscript 不吃 UTF-8 BOM）；`.ps1` 反之必須**有 BOM**，否則 PS 5.1 會把中文讀成亂碼。
 - **切編輯器分頁走 UI Automation**：Win32 只看得到視窗。VS Code 的分頁是 `TabItem`，名稱等於對話標題，畫面分成多個編輯器群組時會多一段 `, 編輯器群組 N` 後綴。切換用 `SelectionItemPattern.Select()`（`InvokePattern` 不存在）；讀 `IsSelected` 驗證會**慢一拍**拿到上一次的值，別因此以為沒切成功。
 - **透明度一律走 `BeginAnimation`**：混用直接指派 `Opacity` 會被動畫的保留值蓋掉，滑鼠移開後就變不回半透明。

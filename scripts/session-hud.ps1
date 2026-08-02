@@ -459,7 +459,6 @@ if (Test-Path $PosFile) {
 }
 
 $HeaderBar.Add_MouseLeftButtonDown({ $win.DragMove() })
-$CloseBtn.Add_MouseLeftButtonUp({ $win.Close() })
 
 # --- 縮小化：只留標題列 --------------------------------------------------------
 # 收合的是「標題列以下的所有東西」而不是把視窗藏起來——縮起來還是看得到 session 數
@@ -489,15 +488,25 @@ function Toggle-Collapsed {
     } catch { Write-Diag ("TOGGLE 例外: {0}" -f $_.Exception.Message) }
 }
 
-# 用 Preview（隧道）而不是 MouseLeftButtonUp：Down 一旦冒泡到 HeaderBar 就會觸發 DragMove()，
-# 它的模態移動迴圈可能把接下來的 MouseUp 吃掉。Preview 比 HeaderBar 先拿到事件，
-# 標成 Handled 就不會進 DragMove，收合也立刻發生。
+# 標題列上的按鈕一律用 Preview（隧道）而不是 MouseLeftButtonUp：
+# Down 一旦冒泡到 HeaderBar 就會觸發 DragMove()，它的模態移動迴圈會把接下來的 MouseUp 吃掉，
+# 於是綁在 Up 上的處理器永遠不會被呼叫——按下去毫無反應，也沒有任何例外可查。
+# Preview 比 HeaderBar 先拿到事件，標成 Handled 就不會進 DragMove。
 $MinBtn.Add_PreviewMouseLeftButtonDown({
     param($s, $e)
     try {
         $e.Handled = $true
         Toggle-Collapsed
     } catch { Write-Diag ("MINBTN 例外: {0}" -f $_.Exception.Message) }
+})
+
+$CloseBtn.Add_PreviewMouseLeftButtonDown({
+    param($s, $e)
+    try {
+        $e.Handled = $true
+        Write-Diag 'CLOSEBTN 關閉視窗'
+        $win.Close()
+    } catch { Write-Diag ("CLOSEBTN 例外: {0}" -f $_.Exception.Message) }
 })
 
 # --- 透明度：平常淡淡的一片，滑鼠移上去才變清楚 --------------------------------

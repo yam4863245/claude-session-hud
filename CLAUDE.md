@@ -113,6 +113,10 @@ done 用 Asterisk、asking 用 Exclamation，同一輪兩者都發生時只響 a
   拿結果推原因會震盪（實測 250↔400 來回）或崩塌（37.8 → 3.2 → 12.0 → 9.8）。
   改讀「靠上對齊、沒指定 Height 的根 Border」的 `ActualHeight`，那才是內容真正需要的高度。
 - **命中測試偏移**：列的點擊不綁在列元素上，改由視窗層用實體螢幕座標算索引（`$RowsTopPx` / `$RowPitchPx`）。
+- **標題列上的按鈕不能綁 `MouseLeftButtonUp`**：`HeaderBar` 的 Down 會呼叫 `DragMove()`，
+  它的模態移動迴圈把接下來的 MouseUp 整個吃掉，綁在 Up 上的處理器**永遠不會被呼叫** ——
+  按下去毫無反應，也沒有例外可查。一律用 `Add_PreviewMouseLeftButtonDown` 並設 `$e.Handled = $true`，
+  隧道階段就攔下來，才不會進 DragMove。`✕` 跟 `─` 都踩過這個坑。
 - **WPF 事件處理器會靜默吞例外**：handler 內一律自己 try/catch 並 `Write-Diag`。
 - **跨 runspace 陣列會被包成單一元素**：`.Count` 回 1、`foreach` 只跑一圈 —— 一律先過 `Expand-Sessions`。
 - **編碼**：`.ps1` 必須有 UTF-8 BOM（否則 PS 5.1 讀中文成亂碼），`.vbs` 必須 ASCII 且**無** BOM（cscript 不吃）。Edit 工具可能移除 BOM，改完務必確認。
