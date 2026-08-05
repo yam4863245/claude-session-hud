@@ -131,10 +131,13 @@ done 用 Asterisk、asking 用 Exclamation，同一輪兩者都發生時只響 a
 - **標題列上的按鈕不能綁 `MouseLeftButtonUp`**：`HeaderBar` 的 Down 會呼叫 `DragMove()`，
   它的模態移動迴圈把接下來的 MouseUp 整個吃掉，綁在 Up 上的處理器**永遠不會被呼叫** ——
   按下去毫無反應，也沒有例外可查。一律用 `Add_PreviewMouseLeftButtonDown` 並設 `$e.Handled = $true`，
-  隧道階段就攔下來，才不會進 DragMove。`✕` 跟 `─` 都踩過這個坑。
+  隧道階段就攔下來，才不會進 DragMove。`✕`、`─`、`↻` 都踩過這個坑。
 - **WPF 事件處理器會靜默吞例外**：handler 內一律自己 try/catch 並 `Write-Diag`。
 - **跨 runspace 陣列會被包成單一元素**：`.Count` 回 1、`foreach` 只跑一圈 —— 一律先過 `Expand-Sessions`。
-- **編碼**：`.ps1` 必須有 UTF-8 BOM（否則 PS 5.1 讀中文成亂碼），`.vbs` 必須 ASCII 且**無** BOM（cscript 不吃）。Edit 工具可能移除 BOM，改完務必確認。
+- **編碼**：`.ps1` 必須有 UTF-8 BOM（否則 PS 5.1 讀中文成亂碼），`.vbs` / `.cmd` 必須 ASCII 且**無** BOM。
+  cscript 不吃 BOM；cmd 則是用 OEM 碼頁（zh-TW 是 cp950）讀批次檔，UTF-8 的中文被當成 Big5 解析後
+  lead byte 會把行尾一起吃掉，連 `REM` 註解都會漏出來變成「不是內部或外部命令」——**但 HUD 還是會正常啟動**，
+  只是多噴幾行錯誤，很容易當成沒事。所以 `.cmd` 的註解一律寫英文。Edit 工具可能移除 BOM，改完務必確認。
 - **字型**：任何顯示中文的 `TextBlock` 都要指定 `$UI_FONT`；用 Segoe UI 的話中文是**整片空白**，不是豆腐字。
 - **透明度只走 `BeginAnimation`**：`Window.Opacity` 一旦被動畫設過，之後直接指派就無效（動畫值優先），
   混用會讓滑鼠移開後變不回半透明。hover 用的 `MouseEnter/MouseLeave` 綁在 `RootBorder` 上，
@@ -150,6 +153,10 @@ done 用 Asterisk、asking 用 Exclamation，同一輪兩者都發生時只響 a
 
 - **一般截圖抓不到 HUD**（`CopyFromScreen` 走 BitBlt，連 `CAPTUREBLT` 也一樣，看不到 WPF layered 透明視窗，全螢幕截圖會是空的）。要看畫面用 `PrintWindow(hwnd, hdc, 2)`（`PW_RENDERFULLCONTENT`）。
 - **但 PrintWindow 的像素「座標」不能拿來推點擊位置**。它是照 `TransformToDevice` 的 scale 重新渲染（125% 下 430px 寬、元素在 DIP×1.25 處）；實際的分層表面卻是 1:1 DIP 渲染 —— 用 `WindowFromPoint` 掃邊界實測，可命中區恰好是 `Width/scale × 內容DIP高`（430×471 的視窗矩形只有左上 344×338 可點）。憑 PrintWindow 截圖算出的「可見位置」去合成點擊，會點進矩形右側/下緣的穿透區、直接打到底下別的應用程式。要推元素的實際位置：拿 `TranslatePoint` 的 DIP 值「不乘 scale」，或用 `WindowFromPoint` 掃描驗證。
+  **從外面驗證時最省事的是 UIA 的 `BoundingRectangle`，它給的就是可以直接點的螢幕座標**
+  （`AutomationId` 就是 XAML 的 `x:Name`）。別把上面那個 `Width/scale` 當成「UIA 座標要再除以 scale」——
+  可命中區會停在那裡是因為根 Border 靠左對齊、內容本來就只有那麼寬，右邊整條是穿透區，
+  兩者數字接近純屬巧合。拿 UIA 量出的 `CloseBtn` 右緣＋margin 對得上掃描到的邊界，就知道座標沒被縮放。
 - **不要用肉眼估版面尺寸**。遇到排版問題先看 `~/.claude/session-hud/layout-diag.log`（每次啟動重建），需要更多數字就先加 `Write-Diag` 再說。
 - **session 數量會一直變動**（使用者同時開很多個）。「掃描座標 → 點擊」這種驗證要放在同一次執行裡，否則座標會過期並得到誤導性的失敗。
 

@@ -229,6 +229,10 @@ $script:Sync = [hashtable]::Synchronized(@{
     TabScanGen  = 0        # 掃描世代，UI 靠它分辨「這是新的一次掃描」而不是同一份結果重算
     WantTabScan = $false   # 這一輪有沒有列需要核對；沒有就完全不掃
     TabDiag     = $null    # 最近一次掃描的結果摘要，由 UI 抄進 layout-diag.log
+    # 手動重新整理：UI 按一下就 +1，兩個背景 runspace 各自比對「上次看到的號碼」決定要不要
+    # 提早結束等待。用遞增計數而不是 $true/$false 旗標，是因為沒有誰負責把旗標清回去——
+    # 兩邊都要看到同一次請求，誰清都會讓另一邊漏掉。
+    RefreshReq  = 0
 })
 
 $poller = [powershell]::Create()
@@ -329,6 +333,7 @@ $poller.Runspace = $rs
         } catch { return $null }
     }
 
+    $seenRefresh = 0
     while ($true) {
         try {
             # 這個檔 60KB+ 且很常被寫入，用「長度＋修改時間」當快取鍵免得每 3 秒重讀
@@ -393,7 +398,19 @@ $poller.Runspace = $rs
             $Sync.Error = $_.Exception.Message
         }
         $Sync.Stamp = [DateTime]::UtcNow.Ticks
-        Start-Sleep -Seconds 3
+        # 一樣睡 3 秒，只是切成 100ms 一段讓「重新整理」插得進來——
+        # 按下去還要等最多 3 秒才有反應的話，使用者會以為按鈕沒作用而連按好幾下。
+        # 被按醒時把兩個快取都倒掉：它們的鍵是「檔案長度＋修改時間」，內容沒變就不重讀，
+        # 但手動重新整理的語意就是「別相信任何快取，全部重讀一次」。
+        for ($w = 0; $w -lt 30; $w++) {
+            if ($Sync.RefreshReq -ne $seenRefresh) {
+                $seenRefresh = $Sync.RefreshReq
+                $titleCache.Clear()
+                $usageCache.Stamp = ''
+                break
+            }
+            Start-Sleep -Milliseconds 100
+        }
     }
 })
 [void]$poller.BeginInvoke()
@@ -424,8 +441,17 @@ $verifier.Runspace = $vrs
     $cond = New-Object System.Windows.Automation.PropertyCondition(
                 [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
                 [System.Windows.Automation.ControlType]::TabItem)
+    $seenRefresh = 0
     while ($true) {
-        Start-Sleep -Seconds 30
+        # 30 秒一輪，但切成小段讓「重新整理」插隊。那顆按鈕最常見的用途就是
+        # 「這個分頁我早就關了，怎麼還賴在清單上」，而那件事只有這裡查得出來——
+        # 等下一次例行掃描等於按了沒用。
+        # 提早掃不會讓判斷變寬鬆：UI 那邊照樣要「連續兩次掃描都比不到」才藏，
+        # 而且分頁一回來計數就清掉、那一列自己會冒回來。
+        for ($w = 0; $w -lt 300; $w++) {
+            if ($Sync.RefreshReq -ne $seenRefresh) { $seenRefresh = $Sync.RefreshReq; break }
+            Start-Sleep -Milliseconds 100
+        }
         try {
             if (-not $Sync.WantTabScan) { continue }
             $labels = New-Object System.Collections.Generic.List[string]
@@ -473,6 +499,12 @@ $verifier.Runspace = $vrs
         <TextBlock x:Name="HeaderText" Text="Claude Sessions" Foreground="#FFE8E8EC"
                    FontFamily="Segoe UI" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"/>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+          <TextBlock x:Name="RefreshBtn" Text="&#x21BB;" Foreground="#FF8A8A93" FontFamily="Segoe UI" FontSize="12"
+                     VerticalAlignment="Center" Cursor="Hand" Padding="6,2" RenderTransformOrigin="0.5,0.5">
+            <TextBlock.RenderTransform>
+              <RotateTransform x:Name="RefreshSpin" Angle="0"/>
+            </TextBlock.RenderTransform>
+          </TextBlock>
           <TextBlock x:Name="MinBtn" Text="&#x2500;" Foreground="#FF8A8A93" FontFamily="Segoe UI" FontSize="12"
                      VerticalAlignment="Center" Cursor="Hand" Padding="6,2"/>
           <TextBlock x:Name="CloseBtn" Text="&#x2715;" Foreground="#FF8A8A93" FontFamily="Segoe UI" FontSize="12"
@@ -509,6 +541,8 @@ $HeaderBar  = $win.FindName('HeaderBar')
 $HeaderText = $win.FindName('HeaderText')
 $MinBtn     = $win.FindName('MinBtn')
 $CloseBtn   = $win.FindName('CloseBtn')
+$RefreshBtn = $win.FindName('RefreshBtn')
+$RefreshSpin = $win.FindName('RefreshSpin')
 $HeaderDivider = $win.FindName('HeaderDivider')
 $Rows       = $win.FindName('Rows')
 $RowScroll  = $win.FindName('RowScroll')
@@ -587,6 +621,33 @@ $CloseBtn.Add_PreviewMouseLeftButtonDown({
         Write-Diag 'CLOSEBTN 關閉視窗'
         $win.Close()
     } catch { Write-Diag ("CLOSEBTN 例外: {0}" -f $_.Exception.Message) }
+})
+
+# --- 重新整理 -----------------------------------------------------------------
+# 這裡「不做」任何 I/O：清單、標題、用量、分頁核對全都在背景 runspace，
+# UI 執行緒一碰磁碟就是整個視窗卡住。按鈕只負責把號碼牌 +1 把它們叫醒。
+function Invoke-Refresh {
+    $Sync.RefreshReq = [int]$Sync.RefreshReq + 1
+    Write-Diag ("REFRESH req={0}" -f $Sync.RefreshReq)
+    # 轉一圈當回饋：從按下去到新資料畫上來大約 1 秒（claude agents --json 就要 ~640ms），
+    # 這段期間畫面完全沒有任何變化，不給回饋的話使用者會以為按鈕壞了而狂點。
+    try {
+        $spin = New-Object System.Windows.Media.Animation.DoubleAnimation
+        $spin.From = 0.0
+        $spin.To   = 360.0
+        $spin.Duration = New-Object Windows.Duration ([TimeSpan]::FromMilliseconds(500))
+        # 分層透明視窗每一幀都要整面重送，不壓幀率的話這一圈會吃掉不成比例的 CPU
+        [System.Windows.Media.Animation.Timeline]::SetDesiredFrameRate($spin, 30)
+        $RefreshSpin.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $spin)
+    } catch { Write-Diag ("REFRESH 動畫例外: {0}" -f $_.Exception.Message) }
+}
+
+$RefreshBtn.Add_PreviewMouseLeftButtonDown({
+    param($s, $e)
+    try {
+        $e.Handled = $true
+        Invoke-Refresh
+    } catch { Write-Diag ("REFRESHBTN 例外: {0}" -f $_.Exception.Message) }
 })
 
 # --- 透明度：平常淡淡的一片，滑鼠移上去才變清楚 --------------------------------
