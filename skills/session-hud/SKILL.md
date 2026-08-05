@@ -5,7 +5,7 @@ description: 啟動、關閉或重啟 Claude Session HUD —— 那個懸浮在�
 
 # Claude Session HUD 控制
 
-HUD 是一個獨立的 Windows 桌面視窗（PowerShell + WPF），跟 Claude Code 的生命週期無關 —— 它自己跑一個行程，靠 `claude agents --json` 每 3 秒輪詢一次。
+HUD 是一個獨立的 Windows 桌面視窗（PowerShell + WPF），跟 Claude Code 的生命週期無關 —— 它自己跑一個行程，每 3 秒輪詢一次 Claude Code 的行程註冊檔 `~/.claude/sessions/`。
 
 腳本位置：`${CLAUDE_PLUGIN_ROOT}/scripts/`
 
@@ -27,7 +27,7 @@ Start-Process wscript.exe -ArgumentList '"<PLUGIN_ROOT>\scripts\start-hud.vbs"' 
 
 把 `<PLUGIN_ROOT>` 換成 `${CLAUDE_PLUGIN_ROOT}` 的實際值。用 `start-hud.vbs` 而不是直接跑 `.ps1`，這樣不會閃出主控台視窗。
 
-啟動後等約 5 秒再確認 —— 第一次輪詢 `claude agents --json` 要花 ~600ms，加上 WPF 起始化。
+啟動後等約 5 秒再確認 —— 要等第一次輪詢讀完所有轉錄檔，加上 WPF 起始化。
 
 ## 關閉
 

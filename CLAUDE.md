@@ -38,7 +38,7 @@ claude plugin update session-hud
 兩個彼此不知道對方存在的東西，靠檔案系統對接：
 
 1. **HUD 行程**（[scripts/session-hud.ps1](scripts/session-hud.ps1)）—— 獨立桌面行程，與任何 Claude Code session 的生命週期無關。
-   - 背景 runspace（MTA）每 3 秒跑 `claude agents --json`，並讀轉錄檔取對話標題；**所有磁碟 I/O 都在這裡**。
+   - 背景 runspace（MTA）每 3 秒列舉 `~/.claude/sessions/<pid>.json`，並讀轉錄檔取對話標題；**所有磁碟 I/O 都在這裡**。
    - UI 執行緒的 `DispatcherTimer`（700ms）只讀共享的 synchronized hashtable `$Sync` 並重畫。
    - 「一輪加列、下一輪才依量到的高度調視窗」是刻意的兩段式，見 `Apply-PendingResize` 的註解。
 2. **狀態 hooks**（[hooks/hooks.json](hooks/hooks.json) → [scripts/status-hook.cjs](scripts/status-hook.cjs)）—— 全域事件寫 / 刪 `~/.claude/session-status/<sessionId>.json`。
@@ -48,11 +48,21 @@ claude plugin update session-hud
    asking 是真的要你判斷，所以顏色不同、而且會出聲。用 `PreToolUse` 配 tool 名而不是解析
    `Notification` 的 message 字串——後者是給人看的文案，隨時會改。
 
-串起兩邊的 key 是 `claude agents --json` 的 `sessionId`，也就是 hook payload 的 `session_id`。
+串起兩邊的 key 是行程註冊檔的 `sessionId`，也就是 hook payload 的 `session_id`。
 沒有狀態檔 = `unknown`，不是錯誤。
 
-**`claude agents --json` 不等於「使用者看得到的 session」。** VS Code 外掛會預先開好不帶
-`--resume` 的 `claude` 行程等著用，它們有 `sessionId`、會被列出來，但沒有任何對話 ——
+**session 清單不要用 `claude agents --json`。** 那個指令不只是把註冊檔列出來 —— 它還會
+IPC 去問每個 session 活著沒（註冊檔裡的 `peerProtocol`），而**正在跑工具的 session 常常
+來不及回答就被它從輸出裡漏掉**。實測 1.5 秒打一次連打 40 次，筆數是 8→7→3→2→0→7→0 這樣亂跳，
+exit code 全是 0、空的時候就回一個 `[]`（看起來完全不像失敗），同一時間磁碟上的註冊檔穩穩的一直是 7 個。
+拿它當資料源的症狀就是**列整批消失又長回來、而且愈多 session 在跑愈嚴重**；因為視窗高度是兩段式調整的，
+長回來要花好幾個 tick，看起來就是不停閃。改成直接列舉 `~/.claude/sessions/*.json`：
+欄位是它輸出的超集（多了 `entrypoint` / `procStart` / `kind`），一輪 2–3ms（原本 ~640ms）。
+行程死得不乾淨時註冊檔會留著，所以要自己查存活 —— `procStart` 就是 `Process.StartTime.ToFileTime()`
+（實測完全相符），可以順便擋 pid 被回收再利用。讀不到 `StartTime` 就當它還活著。
+
+**行程註冊檔不等於「使用者看得到的 session」。** VS Code 外掛會預先開好不帶
+`--resume` 的 `claude` 行程等著用，它們有 `sessionId`、也有註冊檔，但沒有任何對話 ——
 沒有轉錄檔、也不會觸發任何 hook，畫出來就是一列看不懂的代號。poller 用
 「沒有轉錄檔 **且** 沒有狀態檔」把它們濾掉。兩個條件都要，不能只看轉錄檔：
 轉錄檔路徑是從 cwd 推導的，推導失敗時真的 session 也會找不到檔案。
@@ -60,8 +70,8 @@ claude plugin update session-hud
 
 **關掉編輯器分頁不會結束 session。** 在 VS Code 裡關掉一個 Claude 分頁，那個 `claude.exe`
 行程**不會**結束，也**不會**觸發 `SessionEnd`（實測：只有整個編輯器視窗關掉時才會一次噴一批
-`SessionEnd:other`）。行程還在 → `~/.claude/sessions/<pid>.json` 還在 → `claude agents --json`
-照列 → 轉錄檔也還在，於是上面那道佔位過濾完全擋不住它，那一列就永遠賴在畫面上。
+`SessionEnd:other`）。行程還在 → `~/.claude/sessions/<pid>.json` 還在 → 照列 → 轉錄檔也還在，
+於是上面那道佔位過濾完全擋不住它，那一列就永遠賴在畫面上。
 沒有便宜的判斷依據可用：行程註冊檔沒有心跳，殘留行程的父行程、CPU、handle 數跟活著的一模一樣。
 唯一的真相來源是「編輯器裡到底還有沒有這個分頁」，只能問 UIA，所以 HUD 另開一個 **STA runspace**
 每 30 秒掃一次所有編輯器視窗的 `TabItem` 名稱，**連續兩次**比不到分頁的列才拿掉（分頁改名、

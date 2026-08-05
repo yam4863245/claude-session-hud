@@ -1,7 +1,7 @@
 ﻿# =============================================================================
 # Claude Session HUD — 懸浮顯示所有正在跑的 Claude Code session（跨所有專案）
 #
-# 資料源：claude agents --json（不分專案，全域）
+# 資料源：~/.claude/sessions/<pid>.json 行程註冊檔（不分專案，全域）
 # 必須用 Windows PowerShell 5.1 且 -STA 執行（WPF 需求）
 #   powershell.exe -NoProfile -STA -File session-hud.ps1
 # 建議用同目錄的 start-hud.vbs 啟動，才不會閃出主控台視窗。
@@ -49,21 +49,6 @@ $script:PosFile = Join-Path $StateDir 'hud-pos.json'
 # 介面字型：必須含 CJK 字符集，否則中文標籤在這個宿主底下會整片空白（不是豆腐字）。
 # 列成後備鏈，讓非繁中系統（簡中／日文／純英文）也有字可用。
 $script:UI_FONT = 'Microsoft JhengHei UI, Microsoft YaHei UI, Meiryo UI, Segoe UI'
-
-$script:ClaudeExe = (Get-Command claude -ErrorAction SilentlyContinue).Source
-if (-not $ClaudeExe) {
-    foreach ($c in @("$env:USERPROFILE\.local\bin\claude.exe",
-                     "$env:LOCALAPPDATA\Programs\claude\claude.exe",
-                     "$env:APPDATA\npm\claude.cmd")) {
-        if (Test-Path $c) { $script:ClaudeExe = $c; break }
-    }
-}
-if (-not $ClaudeExe) {
-    [System.Windows.MessageBox]::Show(
-        "找不到 claude 執行檔。請確認 Claude Code CLI 已安裝且在 PATH 上。",
-        'Claude Session HUD') | Out-Null
-    exit 1
-}
 
 # --- Win32：找出並聚焦目標視窗 ------------------------------------------------
 Add-Type @"
@@ -218,7 +203,7 @@ function Find-TargetForSession([string]$baseName, [string]$convTitle) {
     return @{ Win = $best.Win; Tab = $null }
 }
 
-# --- 背景輪詢：claude agents --json 要 ~640ms，絕不能跑在 UI 執行緒上 ----------
+# --- 背景輪詢：所有磁碟 I/O 都在這裡，絕不能跑在 UI 執行緒上 -------------------
 $script:Sync = [hashtable]::Synchronized(@{
     Sessions = @()
     Error    = $null
@@ -241,7 +226,6 @@ $rs.ApartmentState = 'MTA'
 $rs.ThreadOptions  = 'ReuseThread'
 $rs.Open()
 $rs.SessionStateProxy.SetVariable('Sync', $Sync)
-$rs.SessionStateProxy.SetVariable('ClaudeExe', $ClaudeExe)
 $poller.Runspace = $rs
 [void]$poller.AddScript({
     # 對話標題來自轉錄檔 ~/.claude/projects/<正規化cwd>/<sessionId>.jsonl 裡的
@@ -250,20 +234,53 @@ $poller.Runspace = $rs
     $titleCache = @{}
     $statusDir = Join-Path $env:USERPROFILE '.claude\session-status'
 
-    # 只有「在編輯器裡開的 session」才有分頁可以核對；用終端機直接跑的 claude 永遠比不中分頁，
-    # 拿分頁存不存在來判它死刑會把它整個從清單上抹掉。entrypoint 記在 Claude Code 自己的
-    # 行程註冊檔 ~/.claude/sessions/<pid>.json（claude agents --json 沒有這個欄位）。
-    # 一個 pid 的 entrypoint 不會變，查到就快取。
-    $entryCache = @{}
-    function Get-Entrypoint([int]$procId) {
-        if ($entryCache.ContainsKey($procId)) { return $entryCache[$procId] }
-        $v = ''
-        try {
-            $f = Join-Path $env:USERPROFILE ".claude\sessions\$procId.json"
-            if (Test-Path $f) { $v = [string]((Get-Content $f -Raw -ErrorAction Stop | ConvertFrom-Json).entrypoint) }
-        } catch { }
-        $entryCache[$procId] = $v
-        return $v
+    # session 清單直接讀 Claude Code 自己的行程註冊檔 ~/.claude/sessions/<pid>.json，
+    # 不用 `claude agents --json`。
+    #
+    # 那個指令不只是把這些檔列出來——它還會 IPC 去問每個 session 活著沒（註冊檔裡的
+    # peerProtocol），而「正在跑工具」的 session 常常來不及回答就被它從輸出裡漏掉。
+    # 實測 1.5 秒打一次、連打 40 次，回傳筆數是 8→7→3→2→0→7→0 這樣亂跳（exit code 全是 0，
+    # 空的時候就回一個 `[]`），同一時間磁碟上的註冊檔穩穩的一直是 7 個。
+    # HUD 照單全收，於是列整批消失又長回來——而且因為兩段式調整視窗高度，
+    # 長回來要花好幾個 tick，看起來就是不停閃。
+    #
+    # 註冊檔的欄位是 agents --json 輸出的超集（多了 entrypoint / procStart / kind），
+    # 所以換過來沒有損失，還順便省下每 3 秒生一個 claude.exe 的開銷。
+    # 代價是「行程還在」不等於「session 還在」（見下面分頁核對那段），但那本來就擋不住。
+    $sessDir  = Join-Path $env:USERPROFILE '.claude\sessions'
+    $regCache = @{}
+
+    function Get-RegisteredSessions {
+        $out = New-Object System.Collections.Generic.List[object]
+        foreach ($f in (Get-ChildItem $sessDir -Filter '*.json' -ErrorAction SilentlyContinue)) {
+            # 檔案內容不會變（都是開 session 那一刻寫死的），但仍以「長度＋修改時間」當快取鍵：
+            # 剛好讀到寫到一半的檔時 ConvertFrom-Json 會拋例外，這時沿用上一次的結果，
+            # 才不會為了一次瞬間的讀取失敗又讓那一列閃掉。
+            $key = "$($f.Length):$($f.LastWriteTimeUtc.Ticks)"
+            $c = $regCache[$f.Name]
+            if ($c -and $c.Key -eq $key) {
+                $o = $c.Obj
+            } else {
+                try { $o = Get-Content $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json } catch { continue }
+                $regCache[$f.Name] = @{ Key = $key; Obj = $o }
+            }
+            if (-not $o.sessionId) { continue }
+            # headless（claude -p）跑完就走，不該佔一列
+            if ($o.kind -and $o.kind -ne 'interactive') { continue }
+            if (-not (Test-ProcAlive $o)) { continue }
+            $out.Add($o)
+        }
+        return $out
+    }
+
+    # 行程死得不乾淨時註冊檔會留著，所以要自己查存活。procStart 就是
+    # Process.StartTime.ToFileTime()（實測完全相符），拿來擋 pid 被回收再利用的情況。
+    # 讀不到 StartTime（權限之類）就當它還活著——寧可多留一列，也不要把活的 session 抹掉。
+    function Test-ProcAlive($o) {
+        $p = Get-Process -Id ([int]$o.pid) -ErrorAction SilentlyContinue
+        if (-not $p) { return $false }
+        if (-not $o.procStart) { return $true }
+        try { return ([string]$p.StartTime.ToFileTime() -eq [string]$o.procStart) } catch { return $true }
     }
 
     function Resolve-TranscriptPath([string]$cwd, [string]$sessionId) {
@@ -349,8 +366,7 @@ $poller.Runspace = $rs
         } catch { }
 
         try {
-            $raw = & $ClaudeExe agents --json 2>$null | Out-String
-            $list = if ($raw.Trim()) { @($raw | ConvertFrom-Json) } else { @() }
+            $list = Get-RegisteredSessions
 
             # 所有檔案 I/O 都在這個背景 runspace 做，UI 執行緒不碰磁碟。
             $out = New-Object System.Collections.Generic.List[object]
@@ -359,7 +375,7 @@ $poller.Runspace = $rs
                 $tp = Resolve-TranscriptPath $s.cwd $s.sessionId
 
                 # VS Code 的 Claude Code 外掛會「預先」開好一個不帶 --resume 的 claude 行程等著用。
-                # 它有自己的 sessionId、也會被 claude agents --json 列出來，但沒有任何對話：
+                # 它有自己的 sessionId、也有行程註冊檔，但沒有任何對話：
                 # 沒有轉錄檔，也不會觸發任何 hook。對使用者來說那就是一列看不懂的代號，
                 # 而且點了不會切分頁、狀態永遠是「未知」——過濾掉。
                 #
@@ -388,7 +404,7 @@ $poller.Runspace = $rs
                     Started  = [double]$s.startedAt
                     SessId   = [string]$s.sessionId
                     Title    = $title
-                    IsVsCode = ((Get-Entrypoint ([int]$s.pid)) -eq 'claude-vscode')
+                    IsVsCode = ($s.entrypoint -eq 'claude-vscode')
                     Quiet    = $quiet
                 })
             }
@@ -418,7 +434,7 @@ $poller.Runspace = $rs
 # --- 分頁核對：行程還在不等於你還看得到它 --------------------------------------
 # 在 VS Code 裡關掉一個 Claude 分頁，那個 claude.exe「不會」結束，也不會觸發 SessionEnd
 # （實測：SessionEnd 只有整個編輯器視窗關掉時才會一次噴一批）。行程還在 →
-# ~/.claude/sessions/<pid>.json 還在 → claude agents --json 照列 → 轉錄檔也還在，
+# ~/.claude/sessions/<pid>.json 還在 → 照列 → 轉錄檔也還在，
 # 於是「沒轉錄檔且沒狀態檔」那道佔位過濾完全擋不住它，那一列就永遠賴在畫面上。
 #
 # 找不到比較便宜的判斷依據：行程註冊檔沒有心跳，殘留行程的父子關係、CPU、handle 數
@@ -629,7 +645,7 @@ $CloseBtn.Add_PreviewMouseLeftButtonDown({
 function Invoke-Refresh {
     $Sync.RefreshReq = [int]$Sync.RefreshReq + 1
     Write-Diag ("REFRESH req={0}" -f $Sync.RefreshReq)
-    # 轉一圈當回饋：從按下去到新資料畫上來大約 1 秒（claude agents --json 就要 ~640ms），
+    # 轉一圈當回饋：從按下去到新資料畫上來大約 1 秒（要重讀所有轉錄檔的尾端），
     # 這段期間畫面完全沒有任何變化，不給回饋的話使用者會以為按鈕壞了而狂點。
     try {
         $spin = New-Object System.Windows.Media.Animation.DoubleAnimation

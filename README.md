@@ -89,8 +89,8 @@ claude plugin install session-hud
 
 | 元件 | 做什麼 |
 |---|---|
-| `scripts/session-hud.ps1` | HUD 本體。背景 runspace 每 3 秒跑 `claude agents --json`，UI 執行緒只負責繪製 |
-| ↳ 佔位行程過濾 | VS Code 外掛會預先開好備用的 `claude` 行程，它們會出現在 `claude agents --json` 裡但沒有任何對話 —— 沒有轉錄檔也沒有狀態檔的一律不列出 |
+| `scripts/session-hud.ps1` | HUD 本體。背景 runspace 每 3 秒列舉行程註冊檔 `~/.claude/sessions/<pid>.json`（並查行程還在不在），UI 執行緒只負責繪製 |
+| ↳ 佔位行程過濾 | VS Code 外掛會預先開好備用的 `claude` 行程，它們有註冊檔但沒有任何對話 —— 沒有轉錄檔也沒有狀態檔的一律不列出 |
 | ↳ 分頁核對 | 關掉編輯器分頁並不會結束 `claude` 行程，那一列會賴著不走。獨立的 STA runspace 每 30 秒用 UIA 掃一次所有編輯器視窗的分頁名稱，連續兩次找不到對應分頁的列才移除；只查「來自編輯器、有標題、且已經靜止」的列，全部都在跑的時候完全不掃 |
 | `scripts/status-hook.cjs` | 由 hooks 呼叫，把狀態寫到 `~/.claude/session-status/<sessionId>.json` |
 | `hooks/hooks.json` | 全域事件 → 狀態：`UserPromptSubmit`=執行中、`PreToolUse[AskUserQuestion]`=需要我做決定、`PostToolUse[AskUserQuestion]`=執行中、`Notification`=等你、`Stop`=已完成、`SessionEnd`=刪除 |
@@ -122,6 +122,7 @@ claude plugin install session-hud
 
 這個 host（Windows PowerShell 5.1 + WPF + `AllowsTransparency`）有幾個踩過的坑，改動前建議先看程式碼裡的註解：
 
+- **session 清單不要用 `claude agents --json`**：它除了列出行程註冊檔，還會 IPC 去問每個 session 活著沒，而**正在跑工具的 session 常常來不及回答就被漏掉**。實測 1.5 秒打一次連打 40 次，筆數在 8→7→3→2→0→7→0 之間亂跳（exit code 全是 0，空的時候回一個 `[]`，看起來完全不像失敗），同一時間磁碟上的註冊檔穩穩的一直是 7 個。症狀是列整批消失又長回來，**開愈多 session 愈嚴重**。改成直接列舉 `~/.claude/sessions/*.json`（欄位是它輸出的超集）並自己查行程存活，一輪 2–3ms。
 - `Window.Width/Height` 是**實體像素**，但版面量測值（`ExtentHeight`／`ViewportHeight`／`ActualWidth`）是 **DIP**。在 125% 縮放下兩者差 1.25 倍，**兩軸都要換算**。
 - 承上，**版面裡不能有「填滿剩餘空間」的元素**（`Height="*"`、`VerticalAlignment="Stretch"`）。WPF 會拿 325 這個實體像素的數字當成 325 DIP 來排版，但看得到的只有 260 DIP，多出來的 65 DIP 會被那個元素吃掉，排在它下面的東西**整條被推到視窗外**（不是裁一半，是完全消失）。全部改成 `Auto` + `MaxHeight` 就沒事。
 - **視窗高度不要用「剩餘空間」反推**（`win.ActualHeight - viewport`）：viewport 本來就是 `win.Height` 決定的，拿結果推原因會震盪或崩塌。改成讀「靠上對齊、沒有指定 Height 的根 Border」的 `ActualHeight`，那才是內容真正需要的高度。
